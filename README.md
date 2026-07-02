@@ -1,0 +1,56 @@
+# Ecovacs Vacuum Card
+
+A custom Lovelace card for Home Assistant that shows the always-expanded "more info" view for a vacuum entity directly on your dashboard — no need to tap into the more-info dialog.
+
+Built primarily for the Ecovacs (Deebot) integration, which exposes a `rooms` attribute mapping room names to numeric segment IDs, but it will work with any `vacuum.*` entity that exposes a compatible `rooms` attribute (checked via `attributes.rooms`) and the standard `vacuum` domain services.
+
+![screenshot](screenshot.png)
+
+## Features
+
+- Always-expanded card layout (state, last-changed time, battery) — matches the native more-info dialog instead of the collapsed tile view.
+- Play / pause, stop, return-to-dock, and locate buttons.
+- Fan speed selector, built from the entity's `fan_speed_list` attribute.
+- "Clean areas" room picker: tap to multi-select rooms, see numbered badges in selection order, then start a spot-area clean across all selected rooms in one go via `vacuum.send_command` (`spot_area`).
+- No consumable (filter / brush) stats clutter — just the controls you use day to day.
+
+## Installation
+
+### HACS (recommended)
+
+1. In Home Assistant, go to **HACS → Frontend**.
+2. Click the **⋮** menu → **Custom repositories**.
+3. Add this repository URL, category **Lovelace**.
+4. Search for "Ecovacs Vacuum Card" and install.
+5. Add the resource if HACS doesn't do it automatically (**Settings → Dashboards → Resources**).
+
+### Manual
+
+1. Copy `ecovacs-vacuum-card.js` to `/config/www/`.
+2. Add it as a Lovelace resource: **Settings → Dashboards → Resources → Add Resource**
+   - URL: `/local/ecovacs-vacuum-card.js`
+   - Resource type: JavaScript Module
+3. Add the card to a dashboard (see Configuration below).
+
+## Configuration
+
+```yaml
+type: custom:ecovacs-vacuum-card
+entity: vacuum.alfred
+battery_entity: sensor.alfred_battery
+```
+
+| Option           | Required | Description                                                          |
+| ---------------- | -------- | --------------------------------------------------------------------- |
+| `entity`         | Yes      | Your `vacuum.*` entity.                                              |
+| `battery_entity` | No       | A separate `sensor.*` entity for battery percentage, if your vacuum entity doesn't report `battery_level` directly. |
+
+Room shortcuts are read automatically from the entity's `attributes.rooms` dictionary (`{ "kitchen": 11, "lounge": 12, ... }`) — no extra config needed. Room labels/icons are prettified from a small built-in lookup table, falling back to a title-cased version of the room key for anything not in the table.
+
+## Attribution
+
+The robot vacuum illustration used in this card is reused, with attribution, from the MIT-licensed [vacuum-card](https://github.com/denysdovhan/vacuum-card) by Denys Dovhan. All credit for that artwork belongs to the original author.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
