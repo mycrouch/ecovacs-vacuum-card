@@ -7,10 +7,34 @@ class EcovacsVacuumCard extends HTMLElement {
     this._selectedRooms = [];
     this._showAreas = false;
     this._showFan = false;
+    this._rendered = false;
+    this._lastSig = undefined;
   }
 
   set hass(hass) {
     this._hass = hass;
+    if (!this._config) return;
+    const entityId = this._config.entity;
+    const stateObj = hass.states[entityId];
+    const batteryEntity = this._config.battery_entity;
+    const batteryObj = batteryEntity ? hass.states[batteryEntity] : undefined;
+    // Only rebuild the DOM when something relevant actually changed. Rebuilding
+    // innerHTML on every hass tick (which fires for ANY entity in the dashboard,
+    // not just this one) recreates the robot SVG each time and restarts its CSS
+    // animation, which makes the motion look jittery/jumpy even while "static".
+    const sig = JSON.stringify([
+      stateObj && stateObj.state,
+      stateObj && stateObj.last_changed,
+      stateObj && stateObj.attributes && stateObj.attributes.fan_speed,
+      stateObj && stateObj.attributes && stateObj.attributes.fan_speed_list,
+      stateObj && stateObj.attributes && stateObj.attributes.rooms,
+      batteryObj && batteryObj.state,
+    ]);
+    if (this._rendered && sig === this._lastSig) {
+      return;
+    }
+    this._lastSig = sig;
+    this._rendered = true;
     this._render();
   }
 
