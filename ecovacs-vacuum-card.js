@@ -7,35 +7,48 @@ class EcovacsVacuumCard extends HTMLElement {
     this._selectedRooms = [];
     this._showAreas = false;
     this._showFan = false;
-    this._rendered = false;
-    this._lastSig = undefined;
+    this._built = false;
+    this._errorShown = false;
+    this._animClass = '';
+    this._lastChanged = null;
   }
 
+  // The DOM is built exactly ONCE, then patched in place on every update.
+  // Rebuilding innerHTML (even occasionally) recreates the robot SVG element,
+  // which silently restarts its CSS animation from frame 0 — the source of the
+  // jitter/snapping. The reference vacuum-card avoids this because Lit diffs
+  // the DOM and never recreates the animated node; this card now does the same
+  // manually.
   set hass(hass) {
     this._hass = hass;
     if (!this._config) return;
-    const entityId = this._config.entity;
-    const stateObj = hass.states[entityId];
-    const batteryEntity = this._config.battery_entity;
-    const batteryObj = batteryEntity ? hass.states[batteryEntity] : undefined;
-    // Only rebuild the DOM when something relevant actually changed. Rebuilding
-    // innerHTML on every hass tick (which fires for ANY entity in the dashboard,
-    // not just this one) recreates the robot SVG each time and restarts its CSS
-    // animation, which makes the motion look jittery/jumpy even while "static".
-    const sig = JSON.stringify([
-      stateObj && stateObj.state,
-      stateObj && stateObj.last_changed,
-      stateObj && stateObj.attributes && stateObj.attributes.fan_speed,
-      stateObj && stateObj.attributes && stateObj.attributes.fan_speed_list,
-      stateObj && stateObj.attributes && stateObj.attributes.rooms,
-      batteryObj && batteryObj.state,
-    ]);
-    if (this._rendered && sig === this._lastSig) {
+    const stateObj = hass.states[this._config.entity];
+    if (!stateObj) {
+      if (!this._errorShown) {
+        this.innerHTML = `<ha-card><div style="padding:16px;">Entity not found: ${this._config.entity}</div></ha-card>`;
+        this._errorShown = true;
+        this._built = false;
+      }
       return;
     }
-    this._lastSig = sig;
-    this._rendered = true;
-    this._render();
+    this._errorShown = false;
+    if (!this._built) {
+      this._buildDom();
+      this._built = true;
+    }
+    this._updateDynamic();
+  }
+
+  connectedCallback() {
+    // Keep the "x minutes ago" text fresh without touching anything else.
+    this._timeTimer = setInterval(() => this._updateTimeText(), 30000);
+  }
+
+  disconnectedCallback() {
+    if (this._timeTimer) {
+      clearInterval(this._timeTimer);
+      this._timeTimer = null;
+    }
   }
 
   getCardSize() {
@@ -132,127 +145,11 @@ class EcovacsVacuumCard extends HTMLElement {
     this._hass.callService(domain, service, data);
   }
 
-  _toggleRoom(roomId) {
-    const idx = this._selectedRooms.indexOf(roomId);
-    if (idx === -1) {
-      this._selectedRooms.push(roomId);
-    } else {
-      this._selectedRooms.splice(idx, 1);
-    }
-    this._render();
-  }
-
-  _startAreaCleaning(entityId) {
-    if (this._selectedRooms.length === 0) return;
-    this._callService('vacuum', 'send_command', {
-      entity_id: entityId,
-      command: 'spot_area',
-      params: {
-        rooms: [...this._selectedRooms],
-        cleanings: 1,
-      },
-    });
-    this._selectedRooms = [];
-    this._showAreas = false;
-    this._render();
-  }
-
-  _render() {
-    if (!this._hass || !this._config) return;
+  // ---------------------------------------------------------------------
+  // One-time DOM construction. Nothing in here runs again after first build.
+  // ---------------------------------------------------------------------
+  _buildDom() {
     const entityId = this._config.entity;
-    const stateObj = this._hass.states[entityId];
-
-    if (!stateObj) {
-      this.innerHTML = `<ha-card><div style="padding:16px;">Entity not found: ${entityId}</div></ha-card>`;
-      return;
-    }
-
-    const batteryEntity = this._config.battery_entity;
-    const batteryObj = batteryEntity ? this._hass.states[batteryEntity] : undefined;
-    const batteryLevel = batteryObj ? parseFloat(batteryObj.state) : null;
-
-    const state = stateObj.state;
-    const stateLabel = EcovacsVacuumCard.STATE_LABELS[state] || (state.charAt(0).toUpperCase() + state.slice(1));
-    const isCleaning = state === 'cleaning';
-    const attrs = stateObj.attributes || {};
-    const fanSpeed = attrs.fan_speed;
-    const fanSpeedList = attrs.fan_speed_list || [];
-    const rooms = attrs.rooms || {};
-    const roomKeys = Object.keys(rooms);
-
-    const areaName = this._config.name || attrs.friendly_name || 'Vacuum';
-
-    // ---- buttons row ----
-    const buttons = [];
-    buttons.push({
-      icon: isCleaning ? 'mdi:pause' : 'mdi:play',
-      action: () => this._callService('vacuum', isCleaning ? 'pause' : 'start', { entity_id: entityId }),
-    });
-    buttons.push({
-      icon: 'mdi:stop',
-      action: () => this._callService('vacuum', 'stop', { entity_id: entityId }),
-    });
-    buttons.push({
-      icon: 'mdi:home-import-outline',
-      action: () => this._callService('vacuum', 'return_to_base', { entity_id: entityId }),
-    });
-    buttons.push({
-      icon: 'mdi:map-marker',
-      action: () => this._callService('vacuum', 'locate', { entity_id: entityId }),
-    });
-
-    const buttonsHtml = buttons
-      .map(
-        (b, i) => `<button class="icon-btn" data-btn="${i}"><ha-icon icon="${b.icon}"></ha-icon></button>`
-      )
-      .join('');
-
-    // ---- fan speed menu ----
-    const fanMenuHtml = this._showFan
-      ? `<div class="dropdown-menu" id="fan-menu">
-          ${fanSpeedList
-            .map(
-              (f) =>
-                `<div class="dropdown-item ${f === fanSpeed ? 'selected' : ''}" data-fan="${f}">${this._friendlyWord(
-                  f
-                )}</div>`
-            )
-            .join('')}
-        </div>`
-      : '';
-
-    // ---- areas panel ----
-    const areasPanelHtml = this._showAreas
-      ? `<div class="areas-panel">
-          <div class="areas-grid">
-            ${roomKeys
-              .map((key) => {
-                const roomId = rooms[key];
-                const selIdx = this._selectedRooms.indexOf(roomId);
-                const selected = selIdx !== -1;
-                return `<div class="area-tile ${selected ? 'selected' : ''}" data-room="${roomId}">
-                    ${selected ? `<div class="badge">${selIdx + 1}</div>` : ''}
-                    <ha-icon icon="${this._roomIcon(key)}"></ha-icon>
-                    <div class="area-label">${this._friendlyRoom(key)}</div>
-                  </div>`;
-              })
-              .join('')}
-          </div>
-          <div class="areas-footer">
-            <span class="hint">Tap rooms to select, then start cleaning.</span>
-            <div class="areas-actions">
-              <button class="text-btn" id="cancel-areas">Cancel</button>
-              <button class="start-btn" id="start-areas" ${this._selectedRooms.length === 0 ? 'disabled' : ''}>
-                Start cleaning${this._selectedRooms.length ? ` (${this._selectedRooms.length})` : ''}
-              </button>
-            </div>
-          </div>
-        </div>`
-      : '';
-
-    if (!this._styled) {
-      this._styled = true;
-    }
 
     this.innerHTML = `
       <ha-card>
@@ -321,88 +218,245 @@ class EcovacsVacuumCard extends HTMLElement {
         <div class="acard">
           <div class="top-row">
             <div>
-              <div class="state-text">${stateLabel}</div>
-              <div class="time-text">${this._relTime(stateObj.last_changed)}</div>
+              <div class="state-text" data-ref="state"></div>
+              <div class="time-text" data-ref="time"></div>
             </div>
-            ${
-              batteryLevel !== null && !isNaN(batteryLevel)
-                ? `<div class="battery-wrap"><span>${Math.round(batteryLevel)}%</span><ha-icon icon="${this._batteryIcon(
-                    batteryLevel
-                  )}"></ha-icon></div>`
-                : ''
-            }
+            <div class="battery-wrap" data-ref="battery-wrap" style="display:none;">
+              <span data-ref="battery-text"></span>
+              <ha-icon data-ref="battery-icon" icon="mdi:battery-unknown"></ha-icon>
+            </div>
           </div>
           <div class="image-wrap">
-            <div class="robot-image ${state === 'cleaning' ? 'cleaning' : ''} ${
-      state === 'returning' ? 'returning' : ''
-    }">${EcovacsVacuumCard.ROBOT_SVG}</div>
+            <div class="robot-image" data-ref="robot">${EcovacsVacuumCard.ROBOT_SVG}</div>
           </div>
-          <div class="button-row">${buttonsHtml}</div>
+          <div class="button-row">
+            <button class="icon-btn" data-ref="play-btn"><ha-icon data-ref="play-icon" icon="mdi:play"></ha-icon></button>
+            <button class="icon-btn" data-ref="stop-btn"><ha-icon icon="mdi:stop"></ha-icon></button>
+            <button class="icon-btn" data-ref="dock-btn"><ha-icon icon="mdi:home-import-outline"></ha-icon></button>
+            <button class="icon-btn" data-ref="locate-btn"><ha-icon icon="mdi:map-marker"></ha-icon></button>
+          </div>
           <div class="option-row">
-            <button class="option-btn" id="fan-btn">
+            <button class="option-btn" data-ref="fan-btn">
               <ha-icon icon="mdi:fan"></ha-icon>
-              <span><span class="label">Fan speed</span><span class="sub">${
-                fanSpeed ? this._friendlyWord(fanSpeed) : '—'
-              }</span></span>
+              <span><span class="label">Fan speed</span><span class="sub" data-ref="fan-sub">—</span></span>
             </button>
-            <button class="option-btn" id="area-btn">
+            <button class="option-btn" data-ref="area-btn">
               <ha-icon icon="mdi:checkerboard"></ha-icon>
               <span><span class="label">Cleaning</span><span class="sub">By area</span></span>
               <ha-icon class="chevron" icon="mdi:chevron-right"></ha-icon>
             </button>
-            ${fanMenuHtml}
+            <div data-ref="fan-menu"></div>
           </div>
-          ${areasPanelHtml}
+          <div data-ref="areas"></div>
         </div>
       </ha-card>
     `;
 
-    // wire up events
-    this.querySelectorAll('.icon-btn').forEach((el, i) => {
-      el.addEventListener('click', () => buttons[i].action());
+    // Cache element references.
+    this._els = {};
+    this.querySelectorAll('[data-ref]').forEach((el) => {
+      this._els[el.getAttribute('data-ref')] = el;
     });
-    const fanBtn = this.querySelector('#fan-btn');
-    if (fanBtn) {
-      fanBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        this._showFan = !this._showFan;
-        this._showAreas = false;
-        this._render();
-      });
+
+    // Wire static events once. Handlers read current state at click time.
+    this._els['play-btn'].addEventListener('click', () => {
+      this._callService('vacuum', this._isCleaning ? 'pause' : 'start', { entity_id: entityId });
+    });
+    this._els['stop-btn'].addEventListener('click', () => {
+      this._callService('vacuum', 'stop', { entity_id: entityId });
+    });
+    this._els['dock-btn'].addEventListener('click', () => {
+      this._callService('vacuum', 'return_to_base', { entity_id: entityId });
+    });
+    this._els['locate-btn'].addEventListener('click', () => {
+      this._callService('vacuum', 'locate', { entity_id: entityId });
+    });
+    this._els['fan-btn'].addEventListener('click', (e) => {
+      e.stopPropagation();
+      this._showFan = !this._showFan;
+      this._showAreas = false;
+      this._renderFanMenu();
+      this._renderAreasPanel();
+    });
+    this._els['area-btn'].addEventListener('click', () => {
+      this._showAreas = !this._showAreas;
+      this._showFan = false;
+      this._renderFanMenu();
+      this._renderAreasPanel();
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // In-place updates. The robot SVG element is NEVER touched here except to
+  // toggle its animation class when the vacuum's motion state changes.
+  // ---------------------------------------------------------------------
+  _updateDynamic() {
+    const stateObj = this._hass.states[this._config.entity];
+    const state = stateObj.state;
+    this._isCleaning = state === 'cleaning';
+    this._stateObj = stateObj;
+
+    // State label
+    const stateLabel =
+      EcovacsVacuumCard.STATE_LABELS[state] || state.charAt(0).toUpperCase() + state.slice(1);
+    this._setText(this._els['state'], stateLabel);
+
+    // Relative time
+    this._lastChanged = stateObj.last_changed;
+    this._updateTimeText();
+
+    // Battery
+    const batteryEntity = this._config.battery_entity;
+    const batteryObj = batteryEntity ? this._hass.states[batteryEntity] : undefined;
+    const batteryLevel = batteryObj ? parseFloat(batteryObj.state) : null;
+    if (batteryLevel !== null && !isNaN(batteryLevel)) {
+      this._els['battery-wrap'].style.display = 'flex';
+      this._setText(this._els['battery-text'], `${Math.round(batteryLevel)}%`);
+      this._setIcon(this._els['battery-icon'], this._batteryIcon(batteryLevel));
+    } else {
+      this._els['battery-wrap'].style.display = 'none';
     }
-    const areaBtn = this.querySelector('#area-btn');
-    if (areaBtn) {
-      areaBtn.addEventListener('click', () => {
-        this._showAreas = !this._showAreas;
-        this._showFan = false;
-        this._render();
-      });
+
+    // Play/pause icon
+    this._setIcon(this._els['play-icon'], this._isCleaning ? 'mdi:pause' : 'mdi:play');
+
+    // Fan speed label
+    const fanSpeed = stateObj.attributes && stateObj.attributes.fan_speed;
+    this._setText(this._els['fan-sub'], fanSpeed ? this._friendlyWord(fanSpeed) : '—');
+
+    // Animation class — only touch classList when the motion state actually
+    // changes, so a running animation is never interrupted.
+    const desired = state === 'cleaning' ? 'cleaning' : state === 'returning' ? 'returning' : '';
+    if (desired !== this._animClass) {
+      const robot = this._els['robot'];
+      if (this._animClass) robot.classList.remove(this._animClass);
+      if (desired) robot.classList.add(desired);
+      this._animClass = desired;
     }
-    this.querySelectorAll('.dropdown-item').forEach((el) => {
+
+    // If the fan menu is open, keep its selected item in sync.
+    if (this._showFan) this._renderFanMenu();
+  }
+
+  _setText(el, text) {
+    if (el.textContent !== text) el.textContent = text;
+  }
+
+  _setIcon(el, icon) {
+    if (el.getAttribute('icon') !== icon) el.setAttribute('icon', icon);
+  }
+
+  _updateTimeText() {
+    if (!this._els || !this._lastChanged) return;
+    this._setText(this._els['time'], this._relTime(this._lastChanged));
+  }
+
+  // ---------------------------------------------------------------------
+  // Subsection renders — these rebuild ONLY their own container, never the
+  // animated image or the rest of the card.
+  // ---------------------------------------------------------------------
+  _renderFanMenu() {
+    const container = this._els['fan-menu'];
+    if (!this._showFan) {
+      if (container.innerHTML !== '') container.innerHTML = '';
+      return;
+    }
+    const attrs = (this._stateObj && this._stateObj.attributes) || {};
+    const fanSpeed = attrs.fan_speed;
+    const fanSpeedList = attrs.fan_speed_list || [];
+    container.innerHTML = `<div class="dropdown-menu">
+      ${fanSpeedList
+        .map(
+          (f) =>
+            `<div class="dropdown-item ${f === fanSpeed ? 'selected' : ''}" data-fan="${f}">${this._friendlyWord(f)}</div>`
+        )
+        .join('')}
+    </div>`;
+    container.querySelectorAll('.dropdown-item').forEach((el) => {
       el.addEventListener('click', () => {
         const fan = el.getAttribute('data-fan');
-        this._callService('vacuum', 'set_fan_speed', { entity_id: entityId, fan_speed: fan });
+        this._callService('vacuum', 'set_fan_speed', {
+          entity_id: this._config.entity,
+          fan_speed: fan,
+        });
         this._showFan = false;
-        this._render();
+        this._renderFanMenu();
       });
     });
-    this.querySelectorAll('.area-tile').forEach((el) => {
+  }
+
+  _renderAreasPanel() {
+    const container = this._els['areas'];
+    if (!this._showAreas) {
+      if (container.innerHTML !== '') container.innerHTML = '';
+      return;
+    }
+    const attrs = (this._stateObj && this._stateObj.attributes) || {};
+    const rooms = attrs.rooms || {};
+    const roomKeys = Object.keys(rooms);
+
+    container.innerHTML = `<div class="areas-panel">
+      <div class="areas-grid">
+        ${roomKeys
+          .map((key) => {
+            const roomId = rooms[key];
+            const selIdx = this._selectedRooms.indexOf(roomId);
+            const selected = selIdx !== -1;
+            return `<div class="area-tile ${selected ? 'selected' : ''}" data-room="${roomId}">
+                ${selected ? `<div class="badge">${selIdx + 1}</div>` : ''}
+                <ha-icon icon="${this._roomIcon(key)}"></ha-icon>
+                <div class="area-label">${this._friendlyRoom(key)}</div>
+              </div>`;
+          })
+          .join('')}
+      </div>
+      <div class="areas-footer">
+        <span class="hint">Tap rooms to select, then start cleaning.</span>
+        <div class="areas-actions">
+          <button class="text-btn" data-ref="cancel-areas">Cancel</button>
+          <button class="start-btn" data-ref="start-areas" ${this._selectedRooms.length === 0 ? 'disabled' : ''}>
+            Start cleaning${this._selectedRooms.length ? ` (${this._selectedRooms.length})` : ''}
+          </button>
+        </div>
+      </div>
+    </div>`;
+
+    container.querySelectorAll('.area-tile').forEach((el) => {
       el.addEventListener('click', () => {
         const roomId = parseInt(el.getAttribute('data-room'), 10);
-        this._toggleRoom(roomId);
+        const idx = this._selectedRooms.indexOf(roomId);
+        if (idx === -1) {
+          this._selectedRooms.push(roomId);
+        } else {
+          this._selectedRooms.splice(idx, 1);
+        }
+        this._renderAreasPanel();
       });
     });
-    const cancelBtn = this.querySelector('#cancel-areas');
+    const cancelBtn = container.querySelector('[data-ref="cancel-areas"]');
     if (cancelBtn) {
       cancelBtn.addEventListener('click', () => {
         this._selectedRooms = [];
         this._showAreas = false;
-        this._render();
+        this._renderAreasPanel();
       });
     }
-    const startBtn = this.querySelector('#start-areas');
+    const startBtn = container.querySelector('[data-ref="start-areas"]');
     if (startBtn) {
-      startBtn.addEventListener('click', () => this._startAreaCleaning(entityId));
+      startBtn.addEventListener('click', () => {
+        if (this._selectedRooms.length === 0) return;
+        this._callService('vacuum', 'send_command', {
+          entity_id: this._config.entity,
+          command: 'spot_area',
+          params: {
+            rooms: [...this._selectedRooms],
+            cleanings: 1,
+          },
+        });
+        this._selectedRooms = [];
+        this._showAreas = false;
+        this._renderAreasPanel();
+      });
     }
   }
 }
