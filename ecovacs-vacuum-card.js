@@ -138,6 +138,7 @@ class EcovacsVacuumCard extends HTMLElement {
     if (level >= 100) return 'mdi:battery';
     if (level <= 5) return 'mdi:battery-outline';
     const rounded = Math.round(level / 10) * 10;
+    if (rounded >= 100) return 'mdi:battery';
     return `mdi:battery-${rounded}`;
   }
 
@@ -467,5 +468,5 @@ window.customCards = window.customCards || [];
 window.customCards.push({
   type: 'ecovacs-vacuum-card',
   name: 'Ecovacs Vacuum Card',
-  description: 'Always-expanded vacuum card replicating the native more-info dialog, including area-based cleaning. Built for the Ecovacs integration but works with any vacuum entity that exposes a "rooms" attribute.',
+  description: 'Always-expanded vacuum card replicating the native Ecovacs more-info popup, including area-based cleaning. Built for the Ecovacs integration but works with any vacuum entity that exposes a "rooms" attribute.',
 });

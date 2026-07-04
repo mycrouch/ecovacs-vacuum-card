@@ -1,14 +1,14 @@
 # Ecovacs Vacuum Card
 
-A custom Lovelace card for Home Assistant that shows the always-expanded "more info" view for a vacuum entity directly on your dashboard — no need to tap into the more-info dialog.
+A custom Lovelace card for Home Assistant that emulates the native Ecovacs more-info popup as an always-expanded card, directly on your dashboard — the same state, controls, fan speed and area-cleaning options you get when you tap the vacuum entity, without needing to open the dialog.
 
 Built primarily for the Ecovacs (Deebot) integration, which exposes a `rooms` attribute mapping room names to numeric segment IDs, but it will work with any `vacuum.*` entity that exposes a compatible `rooms` attribute (checked via `attributes.rooms`) and the standard `vacuum` domain services.
 
-![screenshot](screenshot.png)
+![screenshot](screenshot.svg)
 
 ## Features
 
-- Always-expanded card layout (state, last-changed time, battery) — matches the native more-info dialog instead of the collapsed tile view.
+- Emulates the existing Ecovacs more-info popup, permanently expanded on the dashboard (state, last-changed time, battery) — no tap-through needed.
 - Play / pause, stop, return-to-dock, and locate buttons.
 - Fan speed selector, built from the entity's `fan_speed_list` attribute.
 - "Clean areas" room picker: tap to multi-select rooms, see numbered badges in selection order, then start a spot-area clean across all selected rooms in one go via `vacuum.send_command` (`spot_area`).
