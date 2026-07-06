@@ -55,6 +55,15 @@ Room shortcuts are read automatically from the entity's `attributes.rooms` dicti
 
 The robot vacuum illustration used in this card is reused, with attribution, from the MIT-licensed [vacuum-card](https://github.com/denysdovhan/vacuum-card) by Denys Dovhan. All credit for that artwork belongs to the original author.
 
+## Related projects
+
+| Repo | What it is |
+|---|---|
+| [hass-airtouch](https://github.com/mycrouch/hass-airtouch) | Polyaire AirTouch 4/5 integration (fork) with a direct-connection mode for consoles on a different subnet/VLAN |
+| [airtouch-card](https://github.com/mycrouch/airtouch-card) | Lovelace card for AirTouch 4/5 - console-style zone control with GUI editor and auto-discovery |
+| [airtouch-gradient-themes](https://github.com/mycrouch/airtouch-gradient-themes) | 20 gradient dashboard themes matching the card styling |
+| [ecovacs-vacuum-card](https://github.com/mycrouch/ecovacs-vacuum-card) | Ecovacs/Deebot vacuum card with per-card theming (default / installed theme / manual gradient) |
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
