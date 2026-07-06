@@ -4,7 +4,12 @@ A custom Lovelace card for Home Assistant that emulates the native Ecovacs more-
 
 Built primarily for the Ecovacs (Deebot) integration, which exposes a `rooms` attribute mapping room names to numeric segment IDs, but it will work with any `vacuum.*` entity that exposes a compatible `rooms` attribute (checked via `attributes.rooms`) and the standard `vacuum` domain services.
 
-![screenshot](screenshot.svg)
+<p align="center">
+  <img src="images/style-default.png" width="32%" alt="Default - basic card, follows your HA theme">
+  <img src="images/style-theme.png" width="32%" alt="Theme - Gradient Purple applied to just this card">
+  <img src="images/style-manual.png" width="32%" alt="Manual - custom gradient colours">
+</p>
+<p align="center"><sub>Default &middot; Theme (Gradient Purple) &middot; Manual gradient</sub></p>
 
 ## Features
 
