@@ -12,6 +12,7 @@ Built primarily for the Ecovacs (Deebot) integration, which exposes a `rooms` at
 - Play / pause, stop, return-to-dock, and locate buttons.
 - Fan speed selector, built from the entity's `fan_speed_list` attribute.
 - "Clean areas" room picker: tap to multi-select rooms, see numbered badges in selection order, then start a spot-area clean across all selected rooms in one go via `vacuum.send_command` (`spot_area`).
+- Optional **gradient background** matching the [AirTouch Card](https://github.com/mycrouch/airtouch-card) style: `gradient: cool | heat | dry | fan | teal | slate`, or a custom pair `gradient: ["#0d2b45", "#1565c0"]`. Omit it for the standard theme-driven look. Pairs nicely with the [AirTouch Gradient Themes](https://github.com/mycrouch/airtouch-gradient-themes) - when using those themes you can skip this option entirely and the card inherits the gradient automatically.
 - No consumable (filter / brush) stats clutter — just the controls you use day to day.
 
 ## Installation

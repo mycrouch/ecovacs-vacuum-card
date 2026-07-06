@@ -146,14 +146,61 @@ class EcovacsVacuumCard extends HTMLElement {
     this._hass.callService(domain, service, data);
   }
 
+  // Gradient presets shared with mycrouch/airtouch-card.
+  static get GRADIENTS() {
+    return {
+      cool: ["#0d2b45", "#1565c0"],
+      heat: ["#3e1a0f", "#e65100"],
+      dry: ["#3a2f0b", "#b28704"],
+      fan: ["#0b3538", "#00838f"],
+      teal: ["#12303d", "#00695c"],
+      slate: ["#23272b", "#3a4046"],
+    };
+  }
+
+  // Resolve the optional `gradient` config: a preset name or [from, to] pair.
+  _gradient() {
+    const g = this._config.gradient;
+    if (!g) return null;
+    const pair = Array.isArray(g)
+      ? g
+      : EcovacsVacuumCard.GRADIENTS[String(g).toLowerCase()];
+    if (!pair || pair.length !== 2) return null;
+    return `linear-gradient(145deg, ${pair[0]} 0%, ${pair[1]} 130%)`;
+  }
+
   // ---------------------------------------------------------------------
   // One-time DOM construction. Nothing in here runs again after first build.
   // ---------------------------------------------------------------------
   _buildDom() {
     const entityId = this._config.entity;
+    const grad = this._gradient();
 
     this.innerHTML = `
-      <ha-card>
+      <ha-card class="${grad ? "grad" : ""}" style="${grad ? `background:${grad};border:none;` : ""}">
+        <style>
+          /* Dark-surface overrides when a gradient background is configured */
+          ha-card.grad .state-text { color: #fff; }
+          ha-card.grad .battery-wrap,
+          ha-card.grad .time-text,
+          ha-card.grad .hint,
+          ha-card.grad .chevron,
+          ha-card.grad .option-btn .label,
+          ha-card.grad .text-btn { color: rgba(255,255,255,0.72); }
+          ha-card.grad .icon-btn,
+          ha-card.grad .option-btn { background: rgba(255,255,255,0.12); color: #fff; }
+          ha-card.grad .icon-btn:hover,
+          ha-card.grad .option-btn:hover { background: rgba(255,255,255,0.2); }
+          ha-card.grad .icon-btn ha-icon,
+          ha-card.grad .option-btn ha-icon { color: #fff; }
+          ha-card.grad .dropdown-menu { background: #262b30; color: #fff; }
+          ha-card.grad .dropdown-item:hover { background: rgba(255,255,255,0.1); }
+          ha-card.grad .areas-panel { border-top-color: rgba(255,255,255,0.14); }
+          ha-card.grad .area-tile { border-color: rgba(255,255,255,0.2); }
+          ha-card.grad .area-tile .area-label { color: #fff; }
+          ha-card.grad .area-tile ha-icon { color: rgba(255,255,255,0.72); }
+          ha-card.grad .area-tile.selected { background: rgba(255,255,255,0.15); border-color: #fff; }
+        </style>
         <style>
           .acard { padding: 16px; }
           .top-row { display: flex; justify-content: space-between; align-items: flex-start; }
