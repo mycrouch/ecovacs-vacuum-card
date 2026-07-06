@@ -44,6 +44,14 @@ class EcovacsVacuumCard extends HTMLElement {
     if (!this._built) {
       this._buildDom();
       this._built = true;
+      this._appliedThemeName = undefined;
+    }
+    const wantTheme = this._config.theme || null;
+    const dark = hass.themes && hass.themes.darkMode;
+    if (this._appliedThemeName !== wantTheme || this._appliedThemeDark !== dark) {
+      this._applyTheme();
+      this._appliedThemeName = wantTheme;
+      this._appliedThemeDark = dark;
     }
     this._updateDynamic();
   }
@@ -186,7 +194,10 @@ class EcovacsVacuumCard extends HTMLElement {
     };
   }
 
-  // Resolve the optional `gradient` config: a preset name or [from, to] pair.
+  // Resolve the optional `gradient` config:
+  //   absent          -> null (default look / themed via the `theme` option)
+  //   [from, to]      -> manual colour pair
+  //   preset name     -> legacy (pre-1.3) named presets, still honoured
   _gradient() {
     const g = this._config.gradient;
     if (!g) return null;
@@ -195,6 +206,33 @@ class EcovacsVacuumCard extends HTMLElement {
       : EcovacsVacuumCard.GRADIENTS[String(g).toLowerCase()];
     if (!pair || pair.length !== 2) return null;
     return `linear-gradient(145deg, ${pair[0]} 0%, ${pair[1]} 130%)`;
+  }
+
+  // Apply a named installed theme (config: theme) to this card only, by
+  // setting the theme's variables as CSS custom properties on the host —
+  // the same approach as HA's applyThemesOnElement. Works with any
+  // installed theme (Gradient themes, Mushroom, etc.).
+  _applyTheme() {
+    if (this._appliedThemeVars) {
+      for (const p of this._appliedThemeVars) this.style.removeProperty(p);
+      this._appliedThemeVars = null;
+    }
+    const name = this._config.theme;
+    if (!name || !this._hass || !this._hass.themes) return;
+    const theme = this._hass.themes.themes && this._hass.themes.themes[name];
+    if (!theme) return;
+    let vars = { ...theme };
+    if (vars.modes) {
+      const m = this._hass.themes.darkMode ? vars.modes.dark : vars.modes.light;
+      delete vars.modes;
+      vars = { ...vars, ...(m || {}) };
+    }
+    this._appliedThemeVars = [];
+    for (const [k, v] of Object.entries(vars)) {
+      const prop = `--${k}`;
+      this.style.setProperty(prop, v);
+      this._appliedThemeVars.push(prop);
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -555,6 +593,11 @@ class EcovacsVacuumCardEditor extends HTMLElement {
 
   setConfig(config) {
     this._config = { ...config };
+    // Styling mode: default (plain card) / theme (apply an installed theme
+    // to this card) / manual (custom gradient colours).
+    if (config.theme) this._mode = 'theme';
+    else if (config.gradient) this._mode = 'manual';
+    else this._mode = 'default';
     this._render();
   }
 
@@ -568,6 +611,19 @@ class EcovacsVacuumCardEditor extends HTMLElement {
     );
   }
 
+  _buildConfig(v) {
+    const config = {
+      type: (this._config && this._config.type) || 'custom:ecovacs-vacuum-card',
+      entity: v.entity,
+    };
+    if (v.mode === 'theme' && v.theme) {
+      config.theme = v.theme;
+    } else if (v.mode === 'manual' && v.gradient_from && v.gradient_to) {
+      config.gradient = [v.gradient_from, v.gradient_to];
+    }
+    return config;
+  }
+
   _render() {
     if (!this._config) return;
     if (!this._form) {
@@ -575,22 +631,27 @@ class EcovacsVacuumCardEditor extends HTMLElement {
       this._form.computeLabel = (s) => s.label || s.name;
       this._form.addEventListener('value-changed', (ev) => {
         ev.stopPropagation();
-        const v = { ...ev.detail.value, ...(ev.detail.value.custom || {}) };
-        const config = { type: this._config.type || 'custom:ecovacs-vacuum-card', entity: v.entity };
-        if (v.gradient_from && v.gradient_to) {
-          config.gradient = [v.gradient_from, v.gradient_to];
-        } else if (v.gradient) {
-          config.gradient = v.gradient;
-        }
+        const v = ev.detail.value;
+        const modeChanged = v.mode !== this._mode;
+        this._mode = v.mode;
+        const config = this._buildConfig(v);
         this._config = config;
         this._emit(config);
+        if (modeChanged) this._updateSchema(v);
       });
       this.appendChild(this._form);
     }
-    const presets = Object.keys(EcovacsVacuumCard.GRADIENTS).filter(
-      (k) => !['cool', 'heat', 'dry', 'fan'].includes(k)
-    );
-    this._form.schema = [
+    this._updateSchema();
+    if (this._hass) this._form.hass = this._hass;
+  }
+
+  _updateSchema(current) {
+    const g = this._config.gradient;
+    const legacyPair =
+      typeof g === 'string'
+        ? EcovacsVacuumCard.GRADIENTS[String(g).toLowerCase()]
+        : null;
+    const schema = [
       {
         name: 'entity',
         label: 'Vacuum entity',
@@ -598,40 +659,54 @@ class EcovacsVacuumCardEditor extends HTMLElement {
         selector: { entity: { domain: 'vacuum' } },
       },
       {
-        name: 'gradient',
-        label: 'Gradient background',
+        name: 'mode',
+        label: 'Style',
         selector: {
           select: {
             mode: 'dropdown',
             options: [
-              { value: '', label: 'None (theme default)' },
-              ...presets.map((k) => ({
-                value: k,
-                label: k.charAt(0).toUpperCase() + k.slice(1),
-              })),
+              { value: 'default', label: 'Default (basic card)' },
+              { value: 'theme', label: 'Theme (apply an installed theme)' },
+              { value: 'manual', label: 'Manual gradient colours' },
             ],
           },
         },
       },
-      {
-        name: 'custom',
-        label: 'Advanced: custom gradient colours',
-        type: 'expandable',
-        flatten: true,
-        schema: [
-          { name: 'gradient_from', label: 'From colour (e.g. #0d2b45)', selector: { text: {} } },
-          { name: 'gradient_to', label: 'To colour (e.g. #1565c0)', selector: { text: {} } },
-        ],
-      },
     ];
-    const g = this._config.gradient;
+    if (this._mode === 'theme') {
+      const themeNames =
+        this._hass && this._hass.themes && this._hass.themes.themes
+          ? Object.keys(this._hass.themes.themes).sort()
+          : [];
+      schema.push({
+        name: 'theme',
+        label: 'Theme',
+        selector: {
+          select: {
+            mode: 'dropdown',
+            options: themeNames.map((t) => ({ value: t, label: t })),
+          },
+        },
+      });
+    }
+    if (this._mode === 'manual') {
+      schema.push(
+        { name: 'gradient_from', label: 'From colour (e.g. #0d2b45)', selector: { text: {} } },
+        { name: 'gradient_to', label: 'To colour (e.g. #1565c0)', selector: { text: {} } }
+      );
+    }
+    this._form.schema = schema;
     this._form.data = {
-      entity: this._config.entity || '',
-      gradient: typeof g === 'string' ? g : '',
-      gradient_from: Array.isArray(g) ? g[0] : '',
-      gradient_to: Array.isArray(g) ? g[1] : '',
+      entity: (current && current.entity) || this._config.entity || '',
+      mode: this._mode,
+      theme: (current && current.theme) || this._config.theme || '',
+      gradient_from:
+        (current && current.gradient_from) ||
+        (Array.isArray(g) ? g[0] : legacyPair ? legacyPair[0] : ''),
+      gradient_to:
+        (current && current.gradient_to) ||
+        (Array.isArray(g) ? g[1] : legacyPair ? legacyPair[1] : ''),
     };
-    if (this._hass) this._form.hass = this._hass;
   }
 }
 
