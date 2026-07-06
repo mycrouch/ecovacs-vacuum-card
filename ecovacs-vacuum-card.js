@@ -1,4 +1,13 @@
 class EcovacsVacuumCard extends HTMLElement {
+  static getConfigElement() {
+    return document.createElement('ecovacs-vacuum-card-editor');
+  }
+
+  static getStubConfig(hass) {
+    const vac = Object.keys(hass.states).find((e) => e.startsWith('vacuum.'));
+    return { entity: vac || '' };
+  }
+
   setConfig(config) {
     if (!config.entity) {
       throw new Error('You need to define an entity (a vacuum.* entity id)');
@@ -146,15 +155,34 @@ class EcovacsVacuumCard extends HTMLElement {
     this._hass.callService(domain, service, data);
   }
 
-  // Gradient presets shared with mycrouch/airtouch-card.
+  // Gradient presets shared with mycrouch/airtouch-gradient-themes.
   static get GRADIENTS() {
     return {
+      blue: ["#0d2b45", "#1565c0"],
+      sky: ["#0f2f4a", "#039be5"],
+      cyan: ["#0b3538", "#00838f"],
+      teal: ["#12303d", "#00695c"],
+      emerald: ["#0c3524", "#00a86b"],
+      green: ["#103316", "#2e7d32"],
+      lime: ["#243508", "#7cb342"],
+      gold: ["#3d3208", "#f9a825"],
+      amber: ["#3a2f0b", "#b28704"],
+      orange: ["#3d2208", "#ef6c00"],
+      red: ["#3e1a0f", "#e65100"],
+      crimson: ["#380d12", "#c62828"],
+      pink: ["#3d1027", "#d81b60"],
+      magenta: ["#33103a", "#ab29c4"],
+      purple: ["#2a1440", "#8e24aa"],
+      violet: ["#221540", "#673ab7"],
+      indigo: ["#1b2050", "#3f51b5"],
+      midnight: ["#10131c", "#2c3e63"],
+      steel: ["#1c2a33", "#546e7a"],
+      slate: ["#23272b", "#3a4046"],
+      // Legacy aliases (pre-1.2 names)
       cool: ["#0d2b45", "#1565c0"],
       heat: ["#3e1a0f", "#e65100"],
       dry: ["#3a2f0b", "#b28704"],
       fan: ["#0b3538", "#00838f"],
-      teal: ["#12303d", "#00695c"],
-      slate: ["#23272b", "#3a4046"],
     };
   }
 
@@ -509,7 +537,106 @@ class EcovacsVacuumCard extends HTMLElement {
   }
 }
 
+// ---------------------------------------------------------------------
+// GUI editor
+// ---------------------------------------------------------------------
+class EcovacsVacuumCardEditor extends HTMLElement {
+  constructor() {
+    super();
+    this._config = null;
+    this._hass = null;
+    this._form = null;
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    if (this._form) this._form.hass = hass;
+  }
+
+  setConfig(config) {
+    this._config = { ...config };
+    this._render();
+  }
+
+  _emit(config) {
+    this.dispatchEvent(
+      new CustomEvent('config-changed', {
+        detail: { config },
+        bubbles: true,
+        composed: true,
+      })
+    );
+  }
+
+  _render() {
+    if (!this._config) return;
+    if (!this._form) {
+      this._form = document.createElement('ha-form');
+      this._form.computeLabel = (s) => s.label || s.name;
+      this._form.addEventListener('value-changed', (ev) => {
+        ev.stopPropagation();
+        const v = { ...ev.detail.value, ...(ev.detail.value.custom || {}) };
+        const config = { type: this._config.type || 'custom:ecovacs-vacuum-card', entity: v.entity };
+        if (v.gradient_from && v.gradient_to) {
+          config.gradient = [v.gradient_from, v.gradient_to];
+        } else if (v.gradient) {
+          config.gradient = v.gradient;
+        }
+        this._config = config;
+        this._emit(config);
+      });
+      this.appendChild(this._form);
+    }
+    const presets = Object.keys(EcovacsVacuumCard.GRADIENTS).filter(
+      (k) => !['cool', 'heat', 'dry', 'fan'].includes(k)
+    );
+    this._form.schema = [
+      {
+        name: 'entity',
+        label: 'Vacuum entity',
+        required: true,
+        selector: { entity: { domain: 'vacuum' } },
+      },
+      {
+        name: 'gradient',
+        label: 'Gradient background',
+        selector: {
+          select: {
+            mode: 'dropdown',
+            options: [
+              { value: '', label: 'None (theme default)' },
+              ...presets.map((k) => ({
+                value: k,
+                label: k.charAt(0).toUpperCase() + k.slice(1),
+              })),
+            ],
+          },
+        },
+      },
+      {
+        name: 'custom',
+        label: 'Advanced: custom gradient colours',
+        type: 'expandable',
+        flatten: true,
+        schema: [
+          { name: 'gradient_from', label: 'From colour (e.g. #0d2b45)', selector: { text: {} } },
+          { name: 'gradient_to', label: 'To colour (e.g. #1565c0)', selector: { text: {} } },
+        ],
+      },
+    ];
+    const g = this._config.gradient;
+    this._form.data = {
+      entity: this._config.entity || '',
+      gradient: typeof g === 'string' ? g : '',
+      gradient_from: Array.isArray(g) ? g[0] : '',
+      gradient_to: Array.isArray(g) ? g[1] : '',
+    };
+    if (this._hass) this._form.hass = this._hass;
+  }
+}
+
 customElements.define('ecovacs-vacuum-card', EcovacsVacuumCard);
+customElements.define('ecovacs-vacuum-card-editor', EcovacsVacuumCardEditor);
 
 window.customCards = window.customCards || [];
 window.customCards.push({
