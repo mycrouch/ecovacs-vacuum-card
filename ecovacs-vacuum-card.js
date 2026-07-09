@@ -575,6 +575,138 @@ class EcovacsVacuumCard extends HTMLElement {
   }
 }
 
+
+// ---------------------------------------------------------------------
+// Theme picker with gradient swatches: shows a small sample chip for each
+// installed theme (from its ha-card-background / card-gradient variable).
+// ---------------------------------------------------------------------
+class EcovacsThemePicker extends HTMLElement {
+  constructor() {
+    super();
+    this._open = false;
+    this._value = '';
+    this._hass = null;
+    this._themesRef = null;
+    this._outside = (e) => {
+      if (!e.composedPath().includes(this)) this._toggle(false);
+    };
+  }
+
+  set hass(h) {
+    this._hass = h;
+    if (h && h.themes !== this._themesRef) {
+      this._themesRef = h.themes;
+      this._render();
+    }
+  }
+
+  set value(v) {
+    if ((v || '') === this._value) return;
+    this._value = v || '';
+    this._render();
+  }
+  get value() {
+    return this._value;
+  }
+
+  disconnectedCallback() {
+    document.removeEventListener('click', this._outside, true);
+  }
+
+  _grad(name) {
+    const t =
+      this._hass && this._hass.themes && this._hass.themes.themes
+        ? this._hass.themes.themes[name]
+        : null;
+    if (!t) return null;
+    const pick = (o) =>
+      o && (o['card-gradient'] || o['ha-card-background'] || o['card-background-color']);
+    const g =
+      pick(t) || pick(t.modes && t.modes.light) || pick(t.modes && t.modes.dark);
+    if (
+      typeof g === 'string' &&
+      (g.startsWith('linear-gradient') || g.startsWith('#') || g.startsWith('rgb'))
+    )
+      return g;
+    return null;
+  }
+
+  _toggle(open) {
+    if (open === this._open) return;
+    this._open = open;
+    if (open) document.addEventListener('click', this._outside, true);
+    else document.removeEventListener('click', this._outside, true);
+    this._render();
+  }
+
+  _render() {
+    const names =
+      this._hass && this._hass.themes && this._hass.themes.themes
+        ? Object.keys(this._hass.themes.themes).sort()
+        : [];
+    const chip = (g) =>
+      `<span class="tp-chip" style="background:${g || 'var(--divider-color,#ccc)'}"></span>`;
+    this.innerHTML = `
+      <style>
+        .tp-wrap { position: relative; display: block; margin-top: 12px; }
+        .tp-field { display: flex; align-items: center; gap: 10px;
+          border: 1px solid var(--divider-color, #ccc); border-radius: 8px;
+          padding: 12px; cursor: pointer;
+          background: var(--mdc-text-field-fill-color, var(--secondary-background-color, #f5f5f5)); }
+        .tp-lbl { font-size: .75em; color: var(--secondary-text-color); }
+        .tp-chip { width: 30px; height: 18px; border-radius: 4px; flex: none;
+          border: 1px solid rgba(127,127,127,.35); }
+        .tp-name { flex: 1; color: var(--primary-text-color); }
+        .tp-caret { opacity: .6; }
+        .tp-list { position: absolute; z-index: 12; left: 0; right: 0; top: calc(100% + 2px);
+          max-height: 280px; overflow: auto;
+          background: var(--card-background-color, #fff);
+          border: 1px solid var(--divider-color, #ccc); border-radius: 8px;
+          box-shadow: 0 4px 16px rgba(0,0,0,.25); }
+        .tp-opt { display: flex; align-items: center; gap: 10px; padding: 9px 12px;
+          cursor: pointer; color: var(--primary-text-color); }
+        .tp-opt:hover { background: rgba(127,127,127,.12); }
+        .tp-opt.sel { background: rgba(127,127,127,.2); }
+      </style>
+      <div class="tp-wrap">
+        <div class="tp-field" role="button" aria-haspopup="listbox">
+          ${chip(this._grad(this._value))}
+          <span class="tp-name">${this._value || 'Select a theme'}<br><span class="tp-lbl">Theme</span></span>
+          <span class="tp-caret">&#9662;</span>
+        </div>
+        ${
+          this._open
+            ? `<div class="tp-list" role="listbox">${names
+                .map(
+                  (n) =>
+                    `<div class="tp-opt ${n === this._value ? 'sel' : ''}" data-n="${n}">${chip(this._grad(n))}<span>${n}</span></div>`
+                )
+                .join('')}</div>`
+            : ''
+        }
+      </div>`;
+    this.querySelector('.tp-field').addEventListener('click', (e) => {
+      e.stopPropagation();
+      this._toggle(!this._open);
+    });
+    this.querySelectorAll('.tp-opt').forEach((o) =>
+      o.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this._value = o.dataset.n;
+        this._toggle(false);
+        this._render();
+        this.dispatchEvent(
+          new CustomEvent('value-changed', {
+            detail: { value: this._value },
+            bubbles: true,
+            composed: true,
+          })
+        );
+      })
+    );
+  }
+}
+
 // ---------------------------------------------------------------------
 // GUI editor
 // ---------------------------------------------------------------------
@@ -589,6 +721,7 @@ class EcovacsVacuumCardEditor extends HTMLElement {
   set hass(hass) {
     this._hass = hass;
     if (this._form) this._form.hass = hass;
+    if (this._picker) this._picker.hass = hass;
   }
 
   setConfig(config) {
@@ -616,8 +749,9 @@ class EcovacsVacuumCardEditor extends HTMLElement {
       type: (this._config && this._config.type) || 'custom:ecovacs-vacuum-card',
       entity: v.entity,
     };
-    if (v.mode === 'theme' && v.theme) {
-      config.theme = v.theme;
+    if (v.mode === 'theme') {
+      const th = v.theme || (this._config && this._config.theme);
+      if (th) config.theme = th;
     } else if (v.mode === 'manual' && v.gradient_from && v.gradient_to) {
       config.gradient = [v.gradient_from, v.gradient_to];
     }
@@ -637,12 +771,37 @@ class EcovacsVacuumCardEditor extends HTMLElement {
         const config = this._buildConfig(v);
         this._config = config;
         this._emit(config);
-        if (modeChanged) this._updateSchema(v);
+        if (modeChanged) {
+          this._updateSchema(v);
+          this._syncPicker();
+        }
       });
       this.appendChild(this._form);
     }
     this._updateSchema();
     if (this._hass) this._form.hass = this._hass;
+    this._syncPicker();
+  }
+
+  _syncPicker() {
+    if (this._mode === 'theme') {
+      if (!this._picker) {
+        this._picker = document.createElement('ecovacs-theme-picker');
+        this._picker.addEventListener('value-changed', (ev) => {
+          ev.stopPropagation();
+          const config = { ...this._config, theme: ev.detail.value };
+          delete config.gradient;
+          this._config = config;
+          this._emit(config);
+        });
+        this.appendChild(this._picker);
+      }
+      if (this._hass) this._picker.hass = this._hass;
+      this._picker.value = this._config.theme || '';
+    } else if (this._picker) {
+      this._picker.remove();
+      this._picker = null;
+    }
   }
 
   _updateSchema(current) {
@@ -673,22 +832,6 @@ class EcovacsVacuumCardEditor extends HTMLElement {
         },
       },
     ];
-    if (this._mode === 'theme') {
-      const themeNames =
-        this._hass && this._hass.themes && this._hass.themes.themes
-          ? Object.keys(this._hass.themes.themes).sort()
-          : [];
-      schema.push({
-        name: 'theme',
-        label: 'Theme',
-        selector: {
-          select: {
-            mode: 'dropdown',
-            options: themeNames.map((t) => ({ value: t, label: t })),
-          },
-        },
-      });
-    }
     if (this._mode === 'manual') {
       schema.push(
         { name: 'gradient_from', label: 'From colour (e.g. #0d2b45)', selector: { text: {} } },
@@ -712,6 +855,7 @@ class EcovacsVacuumCardEditor extends HTMLElement {
 
 customElements.define('ecovacs-vacuum-card', EcovacsVacuumCard);
 customElements.define('ecovacs-vacuum-card-editor', EcovacsVacuumCardEditor);
+customElements.define('ecovacs-theme-picker', EcovacsThemePicker);
 
 window.customCards = window.customCards || [];
 window.customCards.push({
