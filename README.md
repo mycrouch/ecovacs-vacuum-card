@@ -21,7 +21,7 @@ Built primarily for the Ecovacs (Deebot) integration, which exposes a `rooms` at
   - **Default** - the basic card, follows your active dashboard theme.
   - **Theme** - apply any *installed* theme to just this card (e.g. [Gradient Themes](https://github.com/mycrouch/gradient-themes), Mushroom variants) without changing the rest of the view.
   - **Manual** - your own gradient from/to colours (`gradient: ["#0d2b45", "#1565c0"]` in YAML).
-- **Weekly scheduler (v1.5)** — a Schedule section on the card face for scheduled cleans at nominated times, per schedule choosing either specific rooms or the whole house. E.g. *"Mon, Wed, Fri at 9:30 am — Lounge, Living, Kitchen"* alongside *"Tue, Thu at 10:00 am — All rooms"*. All the trigger logic runs **server-side** in Home Assistant (native `schedule` helper + one dispatcher automation, created by one-tap setup), so closing the app never breaks a schedule — the same architecture as [irrigation-schedule-card](https://github.com/mycrouch/irrigation-schedule-card).
+- **Weekly scheduler.** Tap **Schedule** on the card face to expand a panel of named schedules, each with a plain-language summary — *"Mon, Wed, Fri at 9:30 am — Dining Room, Lounge Room, Kitchen"* alongside *"Tue, Thu at 10:00 am — All rooms"* — and tap-to-expand editing for day chips, start time and room tiles (or the **All rooms** tile for a whole-house clean). A master **Scheduled cleaning** toggle turns the lot on or off, and the card face shows a live "Next …" readout for the upcoming run. First time in, an admin gets a one-tap **Set up** button that creates everything **server-side** — a native `schedule` helper, a master enable `input_boolean`, and a dispatcher automation (marker-tagged, updated in place on re-runs) — so closing the app never breaks a schedule, the same architecture as [irrigation-schedule-card](https://github.com/mycrouch/irrigation-schedule-card).
 - No consumable (filter / brush) stats clutter — just the controls you use day to day.
 
 ## Installation
@@ -61,6 +61,13 @@ battery_entity: sensor.alfred_battery
 Room shortcuts are read automatically from the entity's `attributes.rooms` dictionary (`{ "kitchen": 11, "lounge": 12, ... }`) — no extra config needed. Room labels/icons are prettified from a small built-in lookup table, falling back to a title-cased version of the room key for anything not in the table.
 
 ## Scheduling
+
+<p align="center">
+  <img src="https://github.com/mycrouch/ecovacs-vacuum-card/raw/main/images/schedule-button.png" width="32%" alt="Ecovacs vacuum card face showing the Schedule row with a live 'Next Fri 9:30 am' summary">
+  <img src="https://github.com/mycrouch/ecovacs-vacuum-card/raw/main/images/schedule-panel.png" width="32%" alt="Schedule panel open on the card face, listing the enabled 'Living areas' schedule — Mon, Wed, Fri at 9:30 am, Dining Room, Lounge Room and Kitchen">
+  <img src="https://github.com/mycrouch/ecovacs-vacuum-card/raw/main/images/schedule-editor.png" width="32%" alt="Expanded schedule editor with day chips, start time and the room tile grid, including the All rooms tile">
+</p>
+<p align="center"><sub>Card face &middot; Schedule panel &middot; Schedule editor</sub></p>
 
 Tap **Schedule** on the card face to expand the scheduler. First time in, an admin gets a one-tap **Set up** button that creates everything server-side — a native `schedule` helper, a master enable `input_boolean`, and a dispatcher automation (marker-tagged, updated in place on re-runs, never duplicated). No YAML.
 
