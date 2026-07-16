@@ -1,3 +1,40 @@
+// ---------------------------------------------------------------------
+// Scheduling helpers (module scope). Monday-first, matching HA's schedule
+// helper week — same convention as mycrouch/irrigation-schedule-card.
+// ---------------------------------------------------------------------
+const EVC_DAYS = [
+  { key: 'monday', label: 'Mon', chip: 'M' },
+  { key: 'tuesday', label: 'Tue', chip: 'T' },
+  { key: 'wednesday', label: 'Wed', chip: 'W' },
+  { key: 'thursday', label: 'Thu', chip: 'T' },
+  { key: 'friday', label: 'Fri', chip: 'F' },
+  { key: 'saturday', label: 'Sat', chip: 'S' },
+  { key: 'sunday', label: 'Sun', chip: 'S' },
+];
+const evcPad2 = (n) => String(n).padStart(2, '0');
+const evcTimeToMin = (t) => {
+  const m = /^(\d{1,2}):(\d{2})/.exec(String(t || ''));
+  if (!m) return null;
+  return parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+};
+const evcMinToTime = (min) => `${evcPad2(Math.floor(min / 60))}:${evcPad2(min % 60)}`;
+const evcFmt12 = (t) => {
+  const min = evcTimeToMin(t);
+  if (min == null) return t || '';
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  const ap = h < 12 ? 'am' : 'pm';
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return `${h12}:${evcPad2(m)} ${ap}`;
+};
+const evcNewId = () => `s${Date.now().toString(36)}${Math.floor(Math.random() * 1e4).toString(36)}`;
+const evcObjectId = (entityId) => String(entityId || '').split('.')[1] || '';
+const evcSlug = (name) =>
+  String(name || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+
 class EcovacsVacuumCard extends HTMLElement {
   static getConfigElement() {
     return document.createElement('ecovacs-vacuum-card-editor');
@@ -12,6 +49,24 @@ class EcovacsVacuumCard extends HTMLElement {
     if (!config.entity) {
       throw new Error('You need to define an entity (a vacuum.* entity id)');
     }
+    // Light update: when only scheduling keys changed (e.g. our own
+    // debounced lovelace save round-tripping), don't tear down the DOM or
+    // the open schedule panel — just take the new schedule data.
+    const prev = this._config;
+    if (
+      prev &&
+      this._built &&
+      prev.entity === config.entity &&
+      prev.theme === config.theme &&
+      JSON.stringify(prev.gradient || null) === JSON.stringify(config.gradient || null) &&
+      prev.battery_entity === config.battery_entity
+    ) {
+      this._config = config;
+      this._schedules = Array.isArray(config.schedules)
+        ? config.schedules.map((s) => ({ ...s }))
+        : this._schedules;
+      return;
+    }
     this._config = config;
     this._selectedRooms = [];
     this._showAreas = false;
@@ -20,6 +75,15 @@ class EcovacsVacuumCard extends HTMLElement {
     this._errorShown = false;
     this._animClass = '';
     this._lastChanged = null;
+    // Scheduling state
+    this._showSchedule = false;
+    this._schedules = Array.isArray(config.schedules)
+      ? config.schedules.map((s) => ({ ...s }))
+      : [];
+    this._schedExpanded = new Set();
+    this._schedSyncing = false;
+    this._schedSettingUp = false;
+    this._schedStatus = '';
   }
 
   // The DOM is built exactly ONCE, then patched in place on every update.
@@ -266,6 +330,14 @@ class EcovacsVacuumCard extends HTMLElement {
           ha-card.grad .area-tile .area-label { color: #fff; }
           ha-card.grad .area-tile ha-icon { color: rgba(255,255,255,0.72); }
           ha-card.grad .area-tile.selected { background: rgba(255,255,255,0.15); border-color: #fff; }
+          ha-card.grad .sched-panel { border-top-color: rgba(255,255,255,0.14); }
+          ha-card.grad .sched-row { border-color: rgba(255,255,255,0.2); }
+          ha-card.grad .sched-name { color: #fff; }
+          ha-card.grad .sched-summary, ha-card.grad .sched-status { color: rgba(255,255,255,0.72); }
+          ha-card.grad .day-chip { border-color: rgba(255,255,255,0.35); color: rgba(255,255,255,0.8); }
+          ha-card.grad .day-chip.on { background: rgba(255,255,255,0.25); border-color: #fff; color: #fff; }
+          ha-card.grad .sched-editor input[type="time"] { background: rgba(255,255,255,0.12); color: #fff; border-color: rgba(255,255,255,0.3); }
+          ha-card.grad .sched-editor .field-label { color: rgba(255,255,255,0.72); }
         </style>
         <style>
           .acard { padding: 16px; }
@@ -328,6 +400,31 @@ class EcovacsVacuumCard extends HTMLElement {
           .text-btn { background: none; border: none; color: var(--secondary-text-color); font-weight: 500; padding: 8px 12px; cursor: pointer; }
           .start-btn { background: var(--primary-color, #03a9f4); color: #fff; border: none; border-radius: 20px; padding: 8px 16px; font-weight: 500; cursor: pointer; }
           .start-btn[disabled] { opacity: 0.4; cursor: default; }
+          .sched-btn-row { display: flex; margin-top: 12px; }
+          .sched-btn-row .option-btn { flex: 1; }
+          .sched-panel { margin-top: 16px; border-top: 1px solid var(--divider-color, #e0e0e0); padding-top: 14px; }
+          .sched-master { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+          .sched-master .m-label { font-size: 14px; font-weight: 500; color: var(--primary-text-color); }
+          .sched-row { border: 1px solid var(--divider-color, #e0e0e0); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; }
+          .sched-head { display: flex; align-items: center; gap: 10px; cursor: pointer; }
+          .sched-head-text { flex: 1; min-width: 0; }
+          .sched-name { font-size: 14px; font-weight: 500; color: var(--primary-text-color); }
+          .sched-summary { font-size: 12px; color: var(--secondary-text-color); margin-top: 2px; }
+          .sched-status { font-size: 12px; color: var(--secondary-text-color); margin-top: 8px; }
+          .sched-editor { margin-top: 12px; display: flex; flex-direction: column; gap: 12px; }
+          .sched-editor .field-label { font-size: 12px; color: var(--secondary-text-color); margin-bottom: 4px; display: block; }
+          .day-chips { display: flex; gap: 6px; }
+          .day-chip { width: 34px; height: 34px; border-radius: 50%; border: 1px solid var(--divider-color, #bbb); background: none; color: var(--secondary-text-color); font-weight: 600; cursor: pointer; font-family: inherit; }
+          .day-chip.on { background: var(--primary-color, #03a9f4); border-color: var(--primary-color, #03a9f4); color: #fff; }
+          .sched-editor input[type="time"] { border: 1px solid var(--divider-color, #bbb); border-radius: 8px; padding: 8px 10px; font-size: 14px; font-family: inherit; background: var(--secondary-background-color, #f2f2f2); color: var(--primary-text-color); }
+          .sched-editor input[type="text"] { border: 1px solid var(--divider-color, #bbb); border-radius: 8px; padding: 8px 10px; font-size: 14px; font-family: inherit; background: var(--secondary-background-color, #f2f2f2); color: var(--primary-text-color); width: 100%; box-sizing: border-box; }
+          .sched-actions { display: flex; justify-content: space-between; align-items: center; }
+          .danger-btn { background: none; border: none; color: var(--error-color, #db4437); font-weight: 500; padding: 8px 0; cursor: pointer; }
+          .sched-footer { display: flex; justify-content: space-between; align-items: center; margin-top: 4px; }
+          .sched-toggle { position: relative; width: 40px; height: 22px; border-radius: 11px; border: none; cursor: pointer; background: var(--disabled-color, #9e9e9e); transition: background .15s; flex: none; }
+          .sched-toggle.on { background: var(--primary-color, #03a9f4); }
+          .sched-toggle::after { content: ''; position: absolute; top: 2px; left: 2px; width: 18px; height: 18px; border-radius: 50%; background: #fff; transition: left .15s; }
+          .sched-toggle.on::after { left: 20px; }
         </style>
         <div class="acard">
           <div class="top-row">
@@ -361,7 +458,15 @@ class EcovacsVacuumCard extends HTMLElement {
             </button>
             <div data-ref="fan-menu"></div>
           </div>
+          <div class="sched-btn-row">
+            <button class="option-btn" data-ref="sched-btn">
+              <ha-icon icon="mdi:calendar-clock"></ha-icon>
+              <span><span class="label">Schedule</span><span class="sub" data-ref="sched-sub">Off</span></span>
+              <ha-icon class="chevron" data-ref="sched-chevron" icon="mdi:chevron-right"></ha-icon>
+            </button>
+          </div>
           <div data-ref="areas"></div>
+          <div data-ref="schedule"></div>
         </div>
       </ha-card>
     `;
@@ -397,6 +502,16 @@ class EcovacsVacuumCard extends HTMLElement {
       this._showFan = false;
       this._renderFanMenu();
       this._renderAreasPanel();
+    });
+    this._els['sched-btn'].addEventListener('click', () => {
+      this._showSchedule = !this._showSchedule;
+      this._showFan = false;
+      this._renderFanMenu();
+      this._setIcon(
+        this._els['sched-chevron'],
+        this._showSchedule ? 'mdi:chevron-down' : 'mdi:chevron-right'
+      );
+      this._renderSchedulePanel();
     });
   }
 
@@ -450,6 +565,18 @@ class EcovacsVacuumCard extends HTMLElement {
 
     // If the fan menu is open, keep its selected item in sync.
     if (this._showFan) this._renderFanMenu();
+
+    // Schedule button subtitle (master state + next run).
+    this._setText(this._els['sched-sub'], this._scheduleSubText());
+
+    // If the schedule panel is open, repaint it only when the master enable
+    // or helper availability actually changed — a full repaint on every hass
+    // tick would steal focus from the inline editors.
+    const schedKey = `${this._schedReady()}|${
+      (this._hass.states[this._schedEnableId()] || {}).state || ''
+    }`;
+    if (this._showSchedule && schedKey !== this._schedKey) this._renderSchedulePanel();
+    this._schedKey = schedKey;
   }
 
   _setText(el, text) {
@@ -572,6 +699,596 @@ class EcovacsVacuumCard extends HTMLElement {
         this._renderAreasPanel();
       });
     }
+  }
+
+  // =====================================================================
+  // Scheduling — schedules live in the card config; a native HA `schedule`
+  // helper is kept in sync (blocks carry the room list as block data) and a
+  // marker-tagged dispatcher automation starts the clean server-side. The
+  // card is only a viewer/editor: closing the app never breaks a schedule.
+  // Same architecture as mycrouch/irrigation-schedule-card.
+  // =====================================================================
+
+  static get AUTOMATION_MARKER() {
+    return 'Created by ecovacs-vacuum-card';
+  }
+
+  _schedHelperId() {
+    if (this._config.schedule_helper) return this._config.schedule_helper;
+    return `schedule.${evcObjectId(this._config.entity)}_cleaning_schedule`;
+  }
+
+  _schedEnableId() {
+    if (this._config.schedule_enable) return this._config.schedule_enable;
+    return `input_boolean.${evcObjectId(this._config.entity)}_schedule_enabled`;
+  }
+
+  _schedReady() {
+    const s = this._hass && this._hass.states;
+    return !!(s && s[this._schedHelperId()] && s[this._schedEnableId()]);
+  }
+
+  _isAdmin() {
+    return !!(this._hass && this._hass.user && this._hass.user.is_admin);
+  }
+
+  _normSched(s) {
+    return {
+      id: s.id || evcNewId(),
+      name: s.name || 'Schedule',
+      days: Array.isArray(s.days)
+        ? s.days.map((d) => parseInt(d, 10)).filter((d) => !isNaN(d) && d >= 0 && d <= 6)
+        : [],
+      time: /^\d{1,2}:\d{2}$/.test(s.time || '') ? s.time : '09:00',
+      rooms: Array.isArray(s.rooms) ? s.rooms.map((r) => parseInt(r, 10)).filter((r) => !isNaN(r)) : [],
+      all: !!s.all,
+      enabled: s.enabled !== false,
+    };
+  }
+
+  _effectiveSchedules() {
+    if (!Array.isArray(this._schedules)) this._schedules = [];
+    return this._schedules;
+  }
+
+  // Reverse map: segment id -> room key, from the entity's rooms attribute.
+  _roomKeyById() {
+    const rooms = (this._stateObj && this._stateObj.attributes && this._stateObj.attributes.rooms) || {};
+    const map = {};
+    Object.keys(rooms).forEach((k) => {
+      map[rooms[k]] = k;
+    });
+    return map;
+  }
+
+  _schedRoomsText(s) {
+    if (s.all) return 'All rooms';
+    if (!s.rooms.length) return 'No rooms selected';
+    const byId = this._roomKeyById();
+    const names = s.rooms.map((id) => {
+      const key = byId[id];
+      return key ? this._friendlyRoom(key) : `Room ${id}`;
+    });
+    if (names.length > 3) return `${names.slice(0, 3).join(', ')} +${names.length - 3}`;
+    return names.join(', ');
+  }
+
+  _schedSummary(s) {
+    if (!s.days.length) return 'No days set';
+    const days =
+      s.days.length === 7
+        ? 'Every day'
+        : [...s.days].sort((a, b) => a - b).map((d) => EVC_DAYS[d].label).join(', ');
+    return `${days} at ${evcFmt12(s.time)} — ${this._schedRoomsText(s)}`;
+  }
+
+  // Next run across enabled schedules, e.g. "Mon 9:30 am" / "today 3:00 pm".
+  _nextRunText() {
+    const now = new Date();
+    const nowDow = (now.getDay() + 6) % 7; // Monday = 0
+    const nowMin = now.getHours() * 60 + now.getMinutes();
+    let best = null;
+    this._effectiveSchedules().forEach((raw) => {
+      const s = this._normSched(raw);
+      if (!s.enabled) return;
+      const t = evcTimeToMin(s.time);
+      if (t == null) return;
+      s.days.forEach((d) => {
+        let delta = (d - nowDow + 7) % 7;
+        if (delta === 0 && t <= nowMin) delta = 7;
+        const score = delta * 1440 + t;
+        if (!best || score < best.score) best = { score, delta, day: d, time: s.time };
+      });
+    });
+    if (!best) return '';
+    const dayText = best.delta === 0 ? 'today' : best.delta === 7 ? EVC_DAYS[best.day].label : EVC_DAYS[best.day].label;
+    return `${dayText} ${evcFmt12(best.time)}`;
+  }
+
+  _scheduleSubText() {
+    if (!this._schedReady()) {
+      return this._effectiveSchedules().length ? 'Not set up' : 'Off';
+    }
+    const enableObj = this._hass.states[this._schedEnableId()];
+    if (enableObj && enableObj.state !== 'on') return 'Paused';
+    const next = this._nextRunText();
+    return next ? `Next ${next}` : 'Nothing scheduled';
+  }
+
+  // ------------------------------------------------------ panel render
+  _renderSchedulePanel() {
+    const container = this._els['schedule'];
+    if (!this._showSchedule) {
+      if (container.innerHTML !== '') container.innerHTML = '';
+      return;
+    }
+    const ready = this._schedReady();
+    const enableId = this._schedEnableId();
+    const enableObj = ready ? this._hass.states[enableId] : null;
+    const masterOn = !!(enableObj && enableObj.state === 'on');
+    const scheds = this._effectiveSchedules().map((s) => this._normSched(s));
+
+    const master = ready
+      ? `<div class="sched-master">
+          <span class="m-label">Scheduled cleaning</span>
+          <button class="sched-toggle ${masterOn ? 'on' : ''}" data-ref="master-toggle" title="Enable or pause all schedules"></button>
+        </div>`
+      : `<div class="sched-master">
+          <span class="m-label">Scheduled cleaning</span>
+          ${
+            this._isAdmin()
+              ? `<button class="start-btn" data-ref="setup-btn" ${this._schedSettingUp ? 'disabled' : ''}>${this._schedSettingUp ? 'Setting up…' : 'Set up'}</button>`
+              : `<span class="hint">Ask an admin to set up</span>`
+          }
+        </div>
+        <div class="hint" style="margin-bottom:10px;">One-tap setup creates a schedule helper, an enable switch and the dispatcher automation — all server-side, so schedules run even with the app closed.</div>`;
+
+    const rows = scheds
+      .map((s) => {
+        const open = this._schedExpanded.has(s.id);
+        const head = `<div class="sched-head" data-sid="${s.id}" data-act="expand">
+            <button class="sched-toggle ${s.enabled ? 'on' : ''}" data-sid="${s.id}" data-act="toggle" title="Enable/disable this schedule"></button>
+            <div class="sched-head-text">
+              <div class="sched-name">${s.name}</div>
+              <div class="sched-summary">${s.enabled ? this._schedSummary(s) : 'Off'}</div>
+            </div>
+            <ha-icon class="chevron" icon="${open ? 'mdi:chevron-down' : 'mdi:chevron-right'}"></ha-icon>
+          </div>`;
+        if (!open) return `<div class="sched-row">${head}</div>`;
+        const chips = EVC_DAYS.map(
+          (d, i) =>
+            `<button class="day-chip ${s.days.includes(i) ? 'on' : ''}" data-sid="${s.id}" data-act="day" data-day="${i}" title="${d.key}">${d.chip}</button>`
+        ).join('');
+        const rooms = (this._stateObj && this._stateObj.attributes && this._stateObj.attributes.rooms) || {};
+        const tiles = [
+          `<div class="area-tile ${s.all ? 'selected' : ''}" data-sid="${s.id}" data-act="all">
+             <ha-icon icon="mdi:home"></ha-icon><div class="area-label">All rooms</div>
+           </div>`,
+          ...Object.keys(rooms).map((key) => {
+            const rid = rooms[key];
+            const sel = !s.all && s.rooms.includes(rid);
+            return `<div class="area-tile ${sel ? 'selected' : ''}" data-sid="${s.id}" data-act="room" data-room="${rid}">
+                <ha-icon icon="${this._roomIcon(key)}"></ha-icon>
+                <div class="area-label">${this._friendlyRoom(key)}</div>
+              </div>`;
+          }),
+        ].join('');
+        return `<div class="sched-row">
+            ${head}
+            <div class="sched-editor">
+              <div><span class="field-label">Name</span><input type="text" data-sid="${s.id}" data-act="name" value="${s.name.replace(/"/g, '&quot;')}"></div>
+              <div><span class="field-label">Days</span><div class="day-chips">${chips}</div></div>
+              <div><span class="field-label">Start time</span><br><input type="time" data-sid="${s.id}" data-act="time" value="${s.time}"></div>
+              <div><span class="field-label">Rooms</span><div class="areas-grid">${tiles}</div></div>
+              <div class="sched-actions">
+                <button class="danger-btn" data-sid="${s.id}" data-act="delete">Delete</button>
+                <button class="text-btn" data-sid="${s.id}" data-act="done">Done</button>
+              </div>
+            </div>
+          </div>`;
+      })
+      .join('');
+
+    container.innerHTML = `<div class="sched-panel">
+      ${master}
+      ${rows}
+      <div class="sched-footer">
+        <button class="start-btn" data-ref="add-sched">+ Add schedule</button>
+        <span class="hint">${ready ? 'Runs server-side via the schedule helper.' : ''}</span>
+      </div>
+      ${this._schedStatus ? `<div class="sched-status">${this._schedStatus}</div>` : ''}
+    </div>`;
+
+    // ---- events
+    const masterToggle = container.querySelector('[data-ref="master-toggle"]');
+    if (masterToggle) {
+      masterToggle.addEventListener('click', () => {
+        this._callService('input_boolean', 'toggle', { entity_id: enableId });
+      });
+    }
+    const setupBtn = container.querySelector('[data-ref="setup-btn"]');
+    if (setupBtn) {
+      setupBtn.addEventListener('click', () => this._setupScheduling());
+    }
+    const addBtn = container.querySelector('[data-ref="add-sched"]');
+    if (addBtn) {
+      addBtn.addEventListener('click', () => {
+        const s = this._normSched({ name: `Schedule ${scheds.length + 1}`, enabled: true });
+        this._schedules.push(s);
+        this._schedExpanded.add(s.id);
+        this._schedChanged();
+      });
+    }
+    container.querySelectorAll('[data-act]').forEach((el) => {
+      const act = el.getAttribute('data-act');
+      const sid = el.getAttribute('data-sid');
+      if (!sid) return;
+      const mutate = (fn) => {
+        const idx = this._schedules.findIndex((x) => (x.id || '') === sid);
+        if (idx === -1) return;
+        const s = this._normSched(this._schedules[idx]);
+        fn(s);
+        this._schedules[idx] = s;
+        this._schedChanged();
+      };
+      if (act === 'expand') {
+        el.addEventListener('click', (e) => {
+          if (e.target.closest('[data-act="toggle"]')) return;
+          if (this._schedExpanded.has(sid)) this._schedExpanded.delete(sid);
+          else this._schedExpanded.add(sid);
+          this._renderSchedulePanel();
+        });
+      } else if (act === 'toggle') {
+        el.addEventListener('click', (e) => {
+          e.stopPropagation();
+          mutate((s) => (s.enabled = !s.enabled));
+        });
+      } else if (act === 'day') {
+        el.addEventListener('click', () => {
+          const d = parseInt(el.getAttribute('data-day'), 10);
+          mutate((s) => {
+            const i = s.days.indexOf(d);
+            if (i === -1) s.days.push(d);
+            else s.days.splice(i, 1);
+            s.days.sort((a, b) => a - b);
+          });
+        });
+      } else if (act === 'time') {
+        el.addEventListener('change', () => {
+          const v = el.value;
+          if (/^\d{1,2}:\d{2}/.test(v)) mutate((s) => (s.time = v.slice(0, 5)));
+        });
+      } else if (act === 'name') {
+        el.addEventListener('change', () => {
+          const v = el.value.trim();
+          if (v) mutate((s) => (s.name = v));
+        });
+      } else if (act === 'all') {
+        el.addEventListener('click', () => {
+          mutate((s) => {
+            s.all = !s.all;
+            if (s.all) s.rooms = [];
+          });
+        });
+      } else if (act === 'room') {
+        el.addEventListener('click', () => {
+          const rid = parseInt(el.getAttribute('data-room'), 10);
+          mutate((s) => {
+            s.all = false;
+            const i = s.rooms.indexOf(rid);
+            if (i === -1) s.rooms.push(rid);
+            else s.rooms.splice(i, 1);
+          });
+        });
+      } else if (act === 'delete') {
+        el.addEventListener('click', () => {
+          const idx = this._schedules.findIndex((x) => (x.id || '') === sid);
+          if (idx !== -1) this._schedules.splice(idx, 1);
+          this._schedExpanded.delete(sid);
+          this._schedChanged();
+        });
+      } else if (act === 'done') {
+        el.addEventListener('click', () => {
+          this._schedExpanded.delete(sid);
+          this._renderSchedulePanel();
+        });
+      }
+    });
+  }
+
+  // Any schedule mutation: persist to the card config, resync the helper,
+  // repaint.
+  _schedChanged() {
+    this._persistSchedules();
+    this._syncScheduleHelper();
+    this._renderSchedulePanel();
+    if (this._els && this._els['sched-sub']) this._setText(this._els['sched-sub'], this._scheduleSubText());
+  }
+
+  // ------------------------------------------------------ persistence
+  // Persist schedules (and helper ids) into the Lovelace config so face
+  // edits survive reloads — config-changed for editor contexts, plus a
+  // direct lovelace/config/save for plain dashboard views. Same pattern as
+  // irrigation-schedule-card.
+  _persistSchedules() {
+    const next = {
+      ...this._config,
+      schedules: this._effectiveSchedules().map((s) => this._normSched(s)),
+    };
+    this._config = next;
+    this.dispatchEvent(
+      new CustomEvent('config-changed', { detail: { config: next }, bubbles: true, composed: true })
+    );
+    // Debounced: a burst of face edits (day chips, room tiles) becomes one
+    // lovelace save, so mid-edit re-renders don't fight the open editor.
+    if (this._saveDebounce) clearTimeout(this._saveDebounce);
+    this._saveDebounce = setTimeout(() => {
+      this._saveDebounce = null;
+      this._saveLovelaceConfig(this._config);
+    }, 1200);
+  }
+
+  async _saveLovelaceConfig(cardConfig) {
+    const hass = this._hass;
+    if (!hass || !hass.callWS) return;
+    try {
+      const urlPath = this._dashboardUrlPath();
+      const req = { type: 'lovelace/config', force: false };
+      if (urlPath) req.url_path = urlPath;
+      const lovelace = await hass.callWS(req);
+      if (!lovelace || !Array.isArray(lovelace.views)) return;
+      let changed = false;
+      const matches = (card) =>
+        card &&
+        (card.type === 'custom:ecovacs-vacuum-card' || card.type === 'ecovacs-vacuum-card') &&
+        card.entity === cardConfig.entity;
+      const walk = (cards) => {
+        if (!Array.isArray(cards)) return;
+        for (let i = 0; i < cards.length; i++) {
+          const card = cards[i];
+          if (matches(card)) {
+            cards[i] = {
+              ...card,
+              schedules: cardConfig.schedules,
+              ...(cardConfig.schedule_helper ? { schedule_helper: cardConfig.schedule_helper } : {}),
+              ...(cardConfig.schedule_enable ? { schedule_enable: cardConfig.schedule_enable } : {}),
+            };
+            changed = true;
+          } else if (card && Array.isArray(card.cards)) {
+            walk(card.cards);
+          }
+        }
+      };
+      (lovelace.views || []).forEach((v) => {
+        walk(v.cards);
+        (v.sections || []).forEach((sec) => walk(sec.cards));
+      });
+      if (!changed) return;
+      const save = { type: 'lovelace/config/save', config: lovelace };
+      if (urlPath) save.url_path = urlPath;
+      await hass.callWS(save);
+    } catch (e) {
+      // Non-admin users / YAML dashboards can't save this way; the
+      // config-changed event still covers the editor path.
+      console.debug('ecovacs-vacuum-card: lovelace save skipped', e);
+    }
+  }
+
+  _dashboardUrlPath() {
+    const seg = (location.pathname || '').split('/').filter(Boolean);
+    const first = seg[0];
+    if (!first || first === 'lovelace') return undefined;
+    return first;
+  }
+
+  // ------------------------------------------------------ helper sync
+  // Regenerate the schedule helper's weekly blocks from the enabled
+  // schedules. Each block is 1 minute long (the dispatcher only uses the
+  // rising edge) and carries the clean target as block data:
+  //   { rooms: "0,6" }  or  { all: true }
+  // Block data values must be scalars (HA schema), hence the CSV string.
+  async _syncScheduleHelper() {
+    const hass = this._hass;
+    const helper = this._schedHelperId();
+    if (!hass || !hass.callWS || !hass.states[helper] || this._schedSyncing) return;
+    this._schedSyncing = true;
+    try {
+      const dayBlocks = {};
+      EVC_DAYS.forEach((d) => (dayBlocks[d.key] = []));
+      this._effectiveSchedules().forEach((raw) => {
+        const s = this._normSched(raw);
+        if (!s.enabled || !s.days.length) return;
+        if (!s.all && !s.rooms.length) return; // nothing to clean
+        const startMin = evcTimeToMin(s.time);
+        if (startMin == null) return;
+        const endMin = startMin + 1;
+        const from = `${evcMinToTime(startMin)}:00`;
+        const to = endMin >= 1440 ? '24:00:00' : `${evcMinToTime(endMin)}:00`;
+        const data = s.all ? { all: true } : { rooms: s.rooms.join(',') };
+        s.days.forEach((di) => {
+          const key = EVC_DAYS[di] && EVC_DAYS[di].key;
+          if (key) dayBlocks[key].push({ from, to, data });
+        });
+      });
+      // Merge blocks that share a start time (union of rooms; "all" wins),
+      // then sort so the helper is tidy and never overlapping.
+      EVC_DAYS.forEach((d) => {
+        const byFrom = {};
+        dayBlocks[d.key].forEach((b) => {
+          const existing = byFrom[b.from];
+          if (!existing) {
+            byFrom[b.from] = b;
+            return;
+          }
+          if (b.data.all || existing.data.all) {
+            existing.data = { all: true };
+          } else {
+            const merged = new Set([
+              ...String(existing.data.rooms).split(','),
+              ...String(b.data.rooms).split(','),
+            ]);
+            existing.data = { rooms: [...merged].join(',') };
+          }
+        });
+        dayBlocks[d.key] = Object.values(byFrom).sort((a, b) =>
+          a.from < b.from ? -1 : a.from > b.from ? 1 : 0
+        );
+      });
+      const payload = { type: 'schedule/update', schedule_id: evcObjectId(helper) };
+      EVC_DAYS.forEach((d) => (payload[d.key] = dayBlocks[d.key]));
+      await hass.callWS(payload);
+    } catch (e) {
+      console.error('ecovacs-vacuum-card: schedule helper sync failed', e);
+      this._schedStatus = 'Could not update the schedule helper — are you an admin?';
+      this._renderSchedulePanel();
+    } finally {
+      this._schedSyncing = false;
+    }
+  }
+
+  // ------------------------------------------------------ one-tap setup
+  async _ensureSchedHelper(domain, currentId, conventionId, createName, extra = {}) {
+    const hass = this._hass;
+    const exists = (id) => id && hass.states[id];
+    if (exists(currentId)) return currentId;
+    if (exists(conventionId)) return conventionId;
+    const derived = `${domain}.${evcSlug(createName)}`;
+    if (exists(derived)) return derived;
+    const r = await hass.callWS({ type: `${domain}/create`, name: createName, ...extra });
+    return `${domain}.${r.id}`;
+  }
+
+  async _setupScheduling() {
+    const hass = this._hass;
+    if (!hass || this._schedSettingUp) return;
+    this._schedSettingUp = true;
+    this._schedStatus = 'Setting up helpers and automation…';
+    this._renderSchedulePanel();
+    try {
+      const vac = this._config.entity;
+      const objId = evcObjectId(vac);
+      const friendly =
+        (hass.states[vac] && hass.states[vac].attributes.friendly_name) || objId;
+
+      const helper = await this._ensureSchedHelper(
+        'schedule',
+        this._config.schedule_helper,
+        `schedule.${objId}_cleaning_schedule`,
+        `${friendly} Cleaning Schedule`,
+        { icon: 'mdi:robot-vacuum' }
+      );
+      const enable = await this._ensureSchedHelper(
+        'input_boolean',
+        this._config.schedule_enable,
+        `input_boolean.${objId}_schedule_enabled`,
+        `${friendly} Schedule Enabled`,
+        { icon: 'mdi:calendar-check' }
+      );
+
+      this._config = { ...this._config, schedule_helper: helper, schedule_enable: enable };
+
+      await this._upsertAutomation(`ecovacs_vacuum_schedule_${objId}`, this._dispatcherConfig(friendly));
+
+      // New enable booleans start "off" — turn it on so setup ends live.
+      if (!hass.states[enable] || hass.states[enable].state !== 'on') {
+        await hass.callService('input_boolean', 'turn_on', { entity_id: enable });
+      }
+
+      this._persistSchedules();
+      // The freshly created helper may not be in hass.states yet; retry the
+      // first sync shortly after.
+      setTimeout(() => this._syncScheduleHelper(), 1500);
+      this._schedStatus = 'Done — schedules now run server-side. Add one below.';
+    } catch (e) {
+      console.error('ecovacs-vacuum-card: setup failed', e);
+      this._schedStatus = `Setup failed: ${(e && (e.message || e.error)) || 'check you are an admin user'}.`;
+    } finally {
+      this._schedSettingUp = false;
+      this._renderSchedulePanel();
+    }
+  }
+
+  // Find an existing automation to update in place (exact alias match on
+  // friendly_name), so re-running setup never creates `_2` siblings.
+  _findExistingAutomationId(desired) {
+    const hass = this._hass;
+    if (!hass || !hass.states) return null;
+    const wantAlias = String(desired.alias || '').trim().toLowerCase();
+    for (const [entityId, st] of Object.entries(hass.states)) {
+      if (!entityId.startsWith('automation.')) continue;
+      const id = st.attributes && st.attributes.id;
+      if (id == null) continue;
+      const alias =
+        st.attributes && st.attributes.friendly_name != null
+          ? String(st.attributes.friendly_name).trim().toLowerCase()
+          : '';
+      if (wantAlias && alias === wantAlias) return id;
+    }
+    return null;
+  }
+
+  async _upsertAutomation(newId, config) {
+    const writeId = this._findExistingAutomationId(config) || newId;
+    await this._hass.callApi('post', `config/automation/config/${writeId}`, config);
+  }
+
+  // The dispatcher: when a schedule block begins, read the block's data off
+  // the helper's attributes and start either a full clean or a spot_area
+  // clean of the block's rooms. Skips when the master enable is off or the
+  // vacuum is already cleaning.
+  _dispatcherConfig(friendly) {
+    const vac = this._config.entity;
+    const helper = this._schedHelperId();
+    const enable = this._schedEnableId();
+    return {
+      alias: `Vacuum Schedule - ${friendly}`,
+      description: `${EcovacsVacuumCard.AUTOMATION_MARKER}. Starts a scheduled clean (all rooms, or the block's room list carried as block data) when a block on ${helper} begins. Managed by the card — edit schedules on the card, not here.`,
+      mode: 'single',
+      trigger: [{ platform: 'state', entity_id: [helper], to: 'on' }],
+      variables: {
+        rooms_csv: "{{ state_attr(trigger.entity_id, 'rooms') | default('', true) }}",
+        clean_all: "{{ state_attr(trigger.entity_id, 'all') | default(false, true) }}",
+      },
+      condition: [
+        { condition: 'state', entity_id: enable, state: 'on' },
+        {
+          condition: 'template',
+          value_template: `{{ not is_state('${vac}', 'cleaning') }}`,
+        },
+      ],
+      action: [
+        {
+          choose: [
+            {
+              conditions: [{ condition: 'template', value_template: '{{ clean_all }}' }],
+              sequence: [{ service: 'vacuum.start', target: { entity_id: vac } }],
+            },
+            {
+              conditions: [
+                {
+                  condition: 'template',
+                  value_template: "{{ (rooms_csv | string | trim) != '' }}",
+                },
+              ],
+              sequence: [
+                {
+                  service: 'vacuum.send_command',
+                  target: { entity_id: vac },
+                  data: {
+                    command: 'spot_area',
+                    params: {
+                      rooms: "{{ (rooms_csv | string).split(',') | map('int') | list }}",
+                      cleanings: 1,
+                    },
+                  },
+                },
+              ],
+            },
+          ],
+          default: [{ stop: 'Schedule block carried no rooms — nothing started' }],
+        },
+      ],
+    };
   }
 }
 
@@ -745,10 +1462,13 @@ class EcovacsVacuumCardEditor extends HTMLElement {
   }
 
   _buildConfig(v) {
-    const config = {
-      type: (this._config && this._config.type) || 'custom:ecovacs-vacuum-card',
-      entity: v.entity,
-    };
+    // Start from the existing config so non-style keys (battery_entity,
+    // schedules, schedule_helper, schedule_enable, …) survive style edits.
+    const config = { ...(this._config || {}) };
+    config.type = config.type || 'custom:ecovacs-vacuum-card';
+    config.entity = v.entity;
+    delete config.theme;
+    delete config.gradient;
     if (v.mode === 'theme') {
       const th = v.theme || (this._config && this._config.theme);
       if (th) config.theme = th;
@@ -861,5 +1581,5 @@ window.customCards = window.customCards || [];
 window.customCards.push({
   type: 'ecovacs-vacuum-card',
   name: 'Ecovacs Vacuum Card',
-  description: 'Always-expanded vacuum card replicating the native Ecovacs more-info popup, including area-based cleaning. Built for the Ecovacs integration but works with any vacuum entity that exposes a "rooms" attribute.',
+  description: 'Always-expanded vacuum card replicating the native Ecovacs more-info popup, including area-based cleaning and a server-side weekly scheduler (per-day room selection or whole-house cleans). Built for the Ecovacs integration but works with any vacuum entity that exposes a "rooms" attribute.',
 });

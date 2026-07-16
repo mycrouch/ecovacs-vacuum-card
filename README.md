@@ -21,6 +21,7 @@ Built primarily for the Ecovacs (Deebot) integration, which exposes a `rooms` at
   - **Default** - the basic card, follows your active dashboard theme.
   - **Theme** - apply any *installed* theme to just this card (e.g. [Gradient Themes](https://github.com/mycrouch/gradient-themes), Mushroom variants) without changing the rest of the view.
   - **Manual** - your own gradient from/to colours (`gradient: ["#0d2b45", "#1565c0"]` in YAML).
+- **Weekly scheduler (v1.5)** — a Schedule section on the card face for scheduled cleans at nominated times, per schedule choosing either specific rooms or the whole house. E.g. *"Mon, Wed, Fri at 9:30 am — Lounge, Living, Kitchen"* alongside *"Tue, Thu at 10:00 am — All rooms"*. All the trigger logic runs **server-side** in Home Assistant (native `schedule` helper + one dispatcher automation, created by one-tap setup), so closing the app never breaks a schedule — the same architecture as [irrigation-schedule-card](https://github.com/mycrouch/irrigation-schedule-card).
 - No consumable (filter / brush) stats clutter — just the controls you use day to day.
 
 ## Installation
@@ -49,12 +50,41 @@ entity: vacuum.alfred
 battery_entity: sensor.alfred_battery
 ```
 
-| Option           | Required | Description                                                          |
-| ---------------- | -------- | --------------------------------------------------------------------- |
-| `entity`         | Yes      | Your `vacuum.*` entity.                                              |
-| `battery_entity` | No       | A separate `sensor.*` entity for battery percentage, if your vacuum entity doesn't report `battery_level` directly. |
+| Option            | Required | Description                                                          |
+| ----------------- | -------- | --------------------------------------------------------------------- |
+| `entity`          | Yes      | Your `vacuum.*` entity.                                              |
+| `battery_entity`  | No       | A separate `sensor.*` entity for battery percentage, if your vacuum entity doesn't report `battery_level` directly. |
+| `schedules`       | No       | Your cleaning schedules (see Scheduling below). Normally edited on the card face, not by hand. |
+| `schedule_helper` | No       | The native `schedule` helper backing the scheduler. Defaults to `schedule.<vacuum>_cleaning_schedule`; created by one-tap setup. |
+| `schedule_enable` | No       | The master `input_boolean` for scheduled cleaning. Defaults to `input_boolean.<vacuum>_schedule_enabled`; created by one-tap setup. |
 
 Room shortcuts are read automatically from the entity's `attributes.rooms` dictionary (`{ "kitchen": 11, "lounge": 12, ... }`) — no extra config needed. Room labels/icons are prettified from a small built-in lookup table, falling back to a title-cased version of the room key for anything not in the table.
+
+## Scheduling
+
+Tap **Schedule** on the card face to expand the scheduler. First time in, an admin gets a one-tap **Set up** button that creates everything server-side — a native `schedule` helper, a master enable `input_boolean`, and a dispatcher automation (marker-tagged, updated in place on re-runs, never duplicated). No YAML.
+
+Each schedule is: a name, the days it runs, a start time, and what to clean — tap room tiles to pick specific rooms, or the **All rooms** tile for a whole-house `vacuum.start`. The same day can carry different room sets at different times, e.g.:
+
+```yaml
+schedules:
+  - id: s1
+    name: Living areas
+    days: [0, 2, 4]     # Mon, Wed, Fri (Monday = 0)
+    time: "09:30"
+    rooms: [12, 0, 6]   # segment ids from attributes.rooms
+    enabled: true
+  - id: s2
+    name: Whole house
+    days: [1, 3]        # Tue, Thu
+    time: "10:00"
+    all: true
+    enabled: true
+```
+
+How it works: the card regenerates the schedule helper's weekly blocks from your enabled schedules, with each block carrying its clean target as block data (`rooms: "12,0,6"` or `all: true`). The dispatcher automation fires on the block's rising edge, reads that data off the helper's attributes, and starts either a `spot_area` clean of those rooms or a full clean — unless the master enable is off or the vacuum is already cleaning. Two schedules landing on the same day and time are merged (room union; *All rooms* wins). Schedule edits made on the card face are persisted back into the card's Lovelace config, so they survive refreshes.
+
+Editing schedules and running setup require an admin user (helpers and automations are created through HA's config APIs). The card itself never runs a timer in the browser.
 
 ## Attribution
 
