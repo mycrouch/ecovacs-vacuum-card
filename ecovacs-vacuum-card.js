@@ -34,6 +34,10 @@ const evcSlug = (name) =>
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '');
+// Transient UI state, keyed by vacuum entity. Lives at module scope because
+// saving the Lovelace config makes HA rebuild the view and RECREATE the card
+// element — without this, the schedule panel retracts on every persisted edit.
+const EVC_UI_STATE = {};
 
 class EcovacsVacuumCard extends HTMLElement {
   static getConfigElement() {
@@ -75,15 +79,26 @@ class EcovacsVacuumCard extends HTMLElement {
     this._errorShown = false;
     this._animClass = '';
     this._lastChanged = null;
-    // Scheduling state
-    this._showSchedule = false;
+    // Scheduling state — restore transient UI state (panel open, expanded
+    // rows) so our own lovelace save recreating the element doesn't retract
+    // an in-progress edit.
+    const ui = EVC_UI_STATE[config.entity] || {};
+    this._showSchedule = !!ui.show;
     this._schedules = Array.isArray(config.schedules)
       ? config.schedules.map((s) => ({ ...s }))
       : [];
-    this._schedExpanded = new Set();
+    this._schedExpanded = new Set(ui.expanded || []);
     this._schedSyncing = false;
     this._schedSettingUp = false;
     this._schedStatus = '';
+    this._savePending = false;
+  }
+
+  _saveUiState() {
+    EVC_UI_STATE[this._config.entity] = {
+      show: this._showSchedule,
+      expanded: [...this._schedExpanded],
+    };
   }
 
   // The DOM is built exactly ONCE, then patched in place on every update.
@@ -130,6 +145,9 @@ class EcovacsVacuumCard extends HTMLElement {
       clearInterval(this._timeTimer);
       this._timeTimer = null;
     }
+    // Safety net: if the element is torn down with a held schedule save
+    // (editor was left open), write it now so nothing is lost.
+    if (this._savePending) this._flushSave();
   }
 
   getCardSize() {
@@ -462,7 +480,7 @@ class EcovacsVacuumCard extends HTMLElement {
             <button class="option-btn" data-ref="sched-btn">
               <ha-icon icon="mdi:calendar-clock"></ha-icon>
               <span><span class="label">Schedule</span><span class="sub" data-ref="sched-sub">Off</span></span>
-              <ha-icon class="chevron" data-ref="sched-chevron" icon="mdi:chevron-right"></ha-icon>
+              <ha-icon class="chevron" data-ref="sched-chevron" icon="${this._showSchedule ? 'mdi:chevron-down' : 'mdi:chevron-right'}"></ha-icon>
             </button>
           </div>
           <div data-ref="areas"></div>
@@ -506,6 +524,8 @@ class EcovacsVacuumCard extends HTMLElement {
     this._els['sched-btn'].addEventListener('click', () => {
       this._showSchedule = !this._showSchedule;
       this._showFan = false;
+      this._saveUiState();
+      if (!this._showSchedule) this._flushSave();
       this._renderFanMenu();
       this._setIcon(
         this._els['sched-chevron'],
@@ -916,6 +936,7 @@ class EcovacsVacuumCard extends HTMLElement {
         const s = this._normSched({ name: `Schedule ${scheds.length + 1}`, enabled: true });
         this._schedules.push(s);
         this._schedExpanded.add(s.id);
+        this._saveUiState();
         this._schedChanged();
       });
     }
@@ -936,6 +957,8 @@ class EcovacsVacuumCard extends HTMLElement {
           if (e.target.closest('[data-act="toggle"]')) return;
           if (this._schedExpanded.has(sid)) this._schedExpanded.delete(sid);
           else this._schedExpanded.add(sid);
+          this._saveUiState();
+          if (this._schedExpanded.size === 0) this._flushSave();
           this._renderSchedulePanel();
         });
       } else if (act === 'toggle') {
@@ -985,11 +1008,15 @@ class EcovacsVacuumCard extends HTMLElement {
           const idx = this._schedules.findIndex((x) => (x.id || '') === sid);
           if (idx !== -1) this._schedules.splice(idx, 1);
           this._schedExpanded.delete(sid);
+          this._saveUiState();
           this._schedChanged();
+          if (this._schedExpanded.size === 0) this._flushSave();
         });
       } else if (act === 'done') {
         el.addEventListener('click', () => {
           this._schedExpanded.delete(sid);
+          this._saveUiState();
+          if (this._schedExpanded.size === 0) this._flushSave();
           this._renderSchedulePanel();
         });
       }
@@ -1019,13 +1046,29 @@ class EcovacsVacuumCard extends HTMLElement {
     this.dispatchEvent(
       new CustomEvent('config-changed', { detail: { config: next }, bubbles: true, composed: true })
     );
-    // Debounced: a burst of face edits (day chips, room tiles) becomes one
-    // lovelace save, so mid-edit re-renders don't fight the open editor.
+    // Saving the Lovelace config makes HA rebuild the view (recreating this
+    // element), which would retract an editor mid-edit. So: while any
+    // schedule row is expanded, HOLD the save and flush it when the editor
+    // closes; otherwise save on a short debounce.
+    if (this._schedExpanded.size > 0) {
+      this._savePending = true;
+      return;
+    }
     if (this._saveDebounce) clearTimeout(this._saveDebounce);
     this._saveDebounce = setTimeout(() => {
       this._saveDebounce = null;
       this._saveLovelaceConfig(this._config);
     }, 1200);
+  }
+
+  _flushSave() {
+    if (!this._savePending) return;
+    this._savePending = false;
+    if (this._saveDebounce) {
+      clearTimeout(this._saveDebounce);
+      this._saveDebounce = null;
+    }
+    this._saveLovelaceConfig(this._config);
   }
 
   async _saveLovelaceConfig(cardConfig) {
