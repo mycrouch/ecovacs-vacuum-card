@@ -105,6 +105,9 @@ class EcovacsVacuumCard extends HTMLElement {
       : [];
     this._schedExpanded = new Set(ui.expanded || []);
     this._schedSyncing = false;
+    this._schedSyncQueued = false;
+    this._schedOutOfSync = false;
+    this._schedReconciled = false;
     this._schedSettingUp = false;
     this._schedStatus = '';
     this._savePending = false;
@@ -610,7 +613,12 @@ class EcovacsVacuumCard extends HTMLElement {
     // tick would steal focus from the inline editors.
     const schedKey = `${this._schedReady()}|${
       (this._hass.states[this._schedEnableId()] || {}).state || ''
-    }`;
+    }|${this._schedOutOfSync}`;
+    // Once per element: check the helper really matches the card's schedules.
+    if (!this._schedReconciled && this._schedReady()) {
+      this._schedReconciled = true;
+      this._reconcileScheduleHelper();
+    }
     if (this._showSchedule && schedKey !== this._schedKey) this._renderSchedulePanel();
     this._schedKey = schedKey;
   }
@@ -847,6 +855,7 @@ class EcovacsVacuumCard extends HTMLElement {
     }
     const enableObj = this._hass.states[this._schedEnableId()];
     if (enableObj && enableObj.state !== 'on') return 'Paused';
+    if (this._schedOutOfSync) return 'Out of sync';
     const next = this._nextRunText();
     return next ? `Next ${next}` : 'Nothing scheduled';
   }
@@ -1146,62 +1155,144 @@ class EcovacsVacuumCard extends HTMLElement {
   // rising edge) and carries the clean target as block data:
   //   { rooms: "0,6" }  or  { all: true }
   // Block data values must be scalars (HA schema), hence the CSV string.
+  // Weekly blocks the helper should hold for the current schedules.
+  _expectedDayBlocks() {
+    const dayBlocks = {};
+    EVC_DAYS.forEach((d) => (dayBlocks[d.key] = []));
+    this._effectiveSchedules().forEach((raw) => {
+      const s = this._normSched(raw);
+      if (!s.enabled || !s.days.length) return;
+      if (!s.all && !s.rooms.length) return; // nothing to clean
+      const startMin = evcTimeToMin(s.time);
+      if (startMin == null) return;
+      const endMin = startMin + 1;
+      const from = `${evcMinToTime(startMin)}:00`;
+      const to = endMin >= 1440 ? '24:00:00' : `${evcMinToTime(endMin)}:00`;
+      const data = s.all ? { all: true } : { rooms: s.rooms.join(',') };
+      s.days.forEach((di) => {
+        const key = EVC_DAYS[di] && EVC_DAYS[di].key;
+        if (key) dayBlocks[key].push({ from, to, data });
+      });
+    });
+    // Merge blocks that share a start time (union of rooms; "all" wins),
+    // then sort so the helper is tidy and never overlapping.
+    EVC_DAYS.forEach((d) => {
+      const byFrom = {};
+      dayBlocks[d.key].forEach((b) => {
+        const existing = byFrom[b.from];
+        if (!existing) {
+          byFrom[b.from] = b;
+          return;
+        }
+        if (b.data.all || existing.data.all) {
+          existing.data = { all: true };
+        } else {
+          const merged = new Set([
+            ...String(existing.data.rooms).split(','),
+            ...String(b.data.rooms).split(','),
+          ]);
+          existing.data = { rooms: [...merged].join(',') };
+        }
+      });
+      dayBlocks[d.key] = Object.values(byFrom).sort((a, b) =>
+        a.from < b.from ? -1 : a.from > b.from ? 1 : 0
+      );
+    });
+    return dayBlocks;
+  }
+
+  // Order-independent signature of a week of blocks (start time + target).
+  // `to` is derived from `from`, so it is left out.
+  _blocksSignature(week) {
+    return EVC_DAYS.map((d) => {
+      const blocks = Array.isArray(week && week[d.key]) ? week[d.key] : [];
+      return blocks
+        .map((b) => {
+          const data = (b && b.data) || {};
+          const from = String((b && b.from) || '').slice(0, 5);
+          const target = data.all
+            ? 'all'
+            : String(data.rooms == null ? '' : data.rooms)
+                .split(',')
+                .map((r) => r.trim())
+                .filter(Boolean)
+                .sort()
+                .join(',');
+          return `${from}=${target}`;
+        })
+        .sort()
+        .join(';');
+    }).join('|');
+  }
+
+  _setOutOfSync(flag, status) {
+    this._schedOutOfSync = flag;
+    if (status !== undefined) this._schedStatus = status;
+    if (this._els && this._els['sched-sub']) this._setText(this._els['sched-sub'], this._scheduleSubText());
+    // Don't repaint over an open inline editor.
+    if (this._showSchedule && this._schedExpanded.size === 0) this._renderSchedulePanel();
+  }
+
+  // Read the helper back and compare it with what the schedules call for.
+  // The card config is the source of truth: on a mismatch an admin's card
+  // re-pushes; anyone else gets a visible warning instead of silent drift.
+  async _reconcileScheduleHelper() {
+    const hass = this._hass;
+    const helper = this._schedHelperId();
+    if (!hass || !hass.callWS || !hass.states[helper]) return;
+    if (!Array.isArray(this._config.schedules)) return; // never configured here
+    try {
+      const list = await hass.callWS({ type: 'schedule/list' });
+      const item = (Array.isArray(list) ? list : []).find((x) => x && x.id === evcObjectId(helper));
+      if (!item) return;
+      if (this._schedSyncing) return; // an edit is already pushing
+      if (this._blocksSignature(item) === this._blocksSignature(this._expectedDayBlocks())) {
+        if (this._schedOutOfSync) this._setOutOfSync(false, '');
+        return;
+      }
+      if (this._isAdmin()) {
+        console.warn('ecovacs-vacuum-card: schedule helper did not match the card — re-syncing');
+        await this._syncScheduleHelper();
+      } else {
+        this._setOutOfSync(
+          true,
+          'Schedules are out of sync with Home Assistant and will not run — ask an admin to open this card.'
+        );
+      }
+    } catch (e) {
+      console.debug('ecovacs-vacuum-card: schedule reconcile skipped', e);
+    }
+  }
+
   async _syncScheduleHelper() {
     const hass = this._hass;
     const helper = this._schedHelperId();
-    if (!hass || !hass.callWS || !hass.states[helper] || this._schedSyncing) return;
+    if (!hass || !hass.callWS || !hass.states[helper]) return;
+    // A push is already in flight: run again when it lands so the helper
+    // always ends up with the latest schedules (never drop an edit).
+    if (this._schedSyncing) {
+      this._schedSyncQueued = true;
+      return;
+    }
     this._schedSyncing = true;
     try {
-      const dayBlocks = {};
-      EVC_DAYS.forEach((d) => (dayBlocks[d.key] = []));
-      this._effectiveSchedules().forEach((raw) => {
-        const s = this._normSched(raw);
-        if (!s.enabled || !s.days.length) return;
-        if (!s.all && !s.rooms.length) return; // nothing to clean
-        const startMin = evcTimeToMin(s.time);
-        if (startMin == null) return;
-        const endMin = startMin + 1;
-        const from = `${evcMinToTime(startMin)}:00`;
-        const to = endMin >= 1440 ? '24:00:00' : `${evcMinToTime(endMin)}:00`;
-        const data = s.all ? { all: true } : { rooms: s.rooms.join(',') };
-        s.days.forEach((di) => {
-          const key = EVC_DAYS[di] && EVC_DAYS[di].key;
-          if (key) dayBlocks[key].push({ from, to, data });
-        });
-      });
-      // Merge blocks that share a start time (union of rooms; "all" wins),
-      // then sort so the helper is tidy and never overlapping.
-      EVC_DAYS.forEach((d) => {
-        const byFrom = {};
-        dayBlocks[d.key].forEach((b) => {
-          const existing = byFrom[b.from];
-          if (!existing) {
-            byFrom[b.from] = b;
-            return;
-          }
-          if (b.data.all || existing.data.all) {
-            existing.data = { all: true };
-          } else {
-            const merged = new Set([
-              ...String(existing.data.rooms).split(','),
-              ...String(b.data.rooms).split(','),
-            ]);
-            existing.data = { rooms: [...merged].join(',') };
-          }
-        });
-        dayBlocks[d.key] = Object.values(byFrom).sort((a, b) =>
-          a.from < b.from ? -1 : a.from > b.from ? 1 : 0
-        );
-      });
+      const dayBlocks = this._expectedDayBlocks();
       const payload = { type: 'schedule/update', schedule_id: evcObjectId(helper) };
       EVC_DAYS.forEach((d) => (payload[d.key] = dayBlocks[d.key]));
       await hass.callWS(payload);
+      if (this._schedOutOfSync) this._setOutOfSync(false, '');
     } catch (e) {
       console.error('ecovacs-vacuum-card: schedule helper sync failed', e);
-      this._schedStatus = 'Could not update the schedule helper — are you an admin?';
-      this._renderSchedulePanel();
+      this._setOutOfSync(
+        true,
+        'Could not update the schedule helper — schedules will not run until it syncs. Are you an admin?'
+      );
     } finally {
       this._schedSyncing = false;
+      if (this._schedSyncQueued) {
+        this._schedSyncQueued = false;
+        this._syncScheduleHelper();
+      }
     }
   }
 
